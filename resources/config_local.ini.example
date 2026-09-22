@@ -1,0 +1,15 @@
+[rag]
+base-url=http://127.0.0.1:5010
+search-path=/v1/search
+timeout=30
+top-k=6
+
+[ollama]
+base-url=http://127.0.0.1:11434
+llm-model=qwen3:14b
+num-ctx=16384
+temperature=0
+llm-timeout=120
+
+[agent]
+recursion-limit=12

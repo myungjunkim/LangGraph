@@ -1,0 +1,7 @@
+langgraph
+langchain-core
+langchain-ollama
+ollama
+httpx
+pytest
+pip-tools
