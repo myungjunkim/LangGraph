@@ -525,7 +525,8 @@ _ASK_RUNNER = """
 import { readFileSync } from 'node:fs';
 const scenarios = JSON.parse(readFileSync(process.argv[2], 'utf-8'));
 const enc = new TextEncoder();
-globalThis.fetch = async () => ({ ok: true, status: 200, body: { getReader: () => globalThis.__reader } });
+const okFetch = async () => ({ ok: true, status: 200, body: { getReader: () => globalThis.__reader } });
+globalThis.fetch = okFetch;
 const { ask, log, Node, serialize } = await import('./ask.mjs');
 
 function makeReader(text, size) {   // 프레임 경계와 무관하게 쪼개 버퍼링도 함께 태운다
@@ -539,6 +540,15 @@ function makeReader(text, size) {   // 프레임 경계와 무관하게 쪼개 �
 }
 const out = [];
 for (const events of scenarios) {
+  if (events === 'fetch-fail') {   // 서버 다운: fetch 자체가 실패하는 경우
+    const before = log.childNodes.length;
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    let thrown = null;
+    try { await ask('질문'); } catch (e) { thrown = e.message; }
+    globalThis.fetch = okFetch;
+    out.push({ thrown, added: log.childNodes.length - before });
+    continue;
+  }
   const sse = events.map(([e, d]) => `event: ${e}\\ndata: ${JSON.stringify(d)}\\n\\n`).join('');
   globalThis.__reader = makeReader(sse, 7);
   await ask('질문');
@@ -665,3 +675,11 @@ def test_ask_renders_markdown_answer_after_search():
     assert "<h3>제목</h3>" in result["html"]
     assert "<strong>굵게</strong>" in result["html"]
     assert "###" not in result["text"] and "**" not in result["text"]
+
+
+def test_ask_fetch_failure_leaves_no_empty_answer_bubble():
+    """fetch 자체가 실패하면(서버 다운) 빈 답변 말풍선을 만들지 않고 예외를 호출자(요청 실패 표시)에 넘긴다."""
+    result = _run_ask(["fetch-fail"])[0]
+
+    assert result["thrown"] == "Failed to fetch"
+    assert result["added"] == 0

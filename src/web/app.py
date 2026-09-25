@@ -59,7 +59,10 @@ def create_app(graph, settings: Settings) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     async def index():
-        return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+        # 캐시 헤더가 없으면 브라우저가 Last-Modified 로 신선도를 추정해 UI 수정 후에도 옛 화면을 띄운다.
+        # FileResponse 는 304 를 주지 않아 매번 전체(약 12KB)를 받지만 로컬 단일 페이지라 무시할 수준이다
+        return FileResponse(STATIC_DIR / "index.html", media_type="text/html",
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/check", response_model=HealthResponse, tags=["health check"])
     def check():                                  # async 제거 — 블로킹 HTTP 2회를 스레드풀에서 실행

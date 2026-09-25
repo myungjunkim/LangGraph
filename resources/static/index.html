@@ -238,12 +238,13 @@ function renderMarkdown(text) {
 
 // POST 기반 SSE: EventSource 는 GET 만 지원하므로 fetch 스트림을 직접 파싱한다
 async function ask(message) {
-  const { wrap, body } = addAnswer();
   const res = await fetch('/v1/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ thread_id: threadId, message }),
   });
+  // fetch 가 실패하면 빈 답변 말풍선이 남지 않도록 응답을 받은 뒤에 만든다
+  const { wrap, body } = addAnswer();
   if (!res.ok) {
     const detail = formatDetail((await res.json().catch(() => ({}))).detail, res.statusText);
     body.classList.add('err'); body.textContent = `오류 ${res.status}: ${detail}`;

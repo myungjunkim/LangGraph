@@ -49,6 +49,12 @@ def test_root_serves_the_ui(settings):
     assert "fetch(" in res.text
 
 
+def test_root_ui_is_revalidated_on_every_load(settings):
+    """UI 수정 직후 브라우저가 캐시된 옛 index.html 을 쓰지 않도록 매번 재검증시킨다."""
+    client, _ = _app([AIMessage("답")], settings=settings)
+    assert client.get("/").headers["cache-control"] == "no-cache"
+
+
 def _fake_get(rag_status=200, models=("qwen3:14b",), rag_error=None):
     def get(url, timeout=None):
         request = httpx.Request("GET", url)

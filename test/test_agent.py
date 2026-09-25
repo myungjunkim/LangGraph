@@ -196,3 +196,8 @@ def test_tool_error_message_is_tied_to_tool_call_id():
 
     tool_message = [m for m in state["messages"] if isinstance(m, ToolMessage)][0]
     assert tool_message.tool_call_id == "call_9"
+
+
+def test_system_prompt_requires_standalone_followup_query():
+    """후속 질문 검색어에 앞 대화 대상을 넣으라는 규칙이 프롬프트에 있어야 한다(agent-06)."""
+    assert "독립 검색어" in SYSTEM_PROMPT
