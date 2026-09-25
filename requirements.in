@@ -5,3 +5,8 @@ ollama
 httpx
 pytest
 pip-tools
+fastapi
+uvicorn
+langgraph-prebuilt
+langgraph-checkpoint
+pydantic

@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KUDOS RAG Agent</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --text:#1f2328; --muted:#656d76; --accent:#0969da; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:14px 20px; background:var(--card); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
+  header h1 { font-size:16px; margin:0; }
+  #health { font-size:12px; color:var(--muted); margin-left:auto; }
+  #reset { font-size:12px; padding:6px 10px; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  #log { display:flex; flex-direction:column; gap:12px; min-height: 50vh; }
+  .msg { padding:12px 14px; border-radius:10px; background:var(--card); border:1px solid var(--line); white-space:pre-wrap; line-height:1.55; }
+  .msg.q { background:#e7f0ff; border-color:#c9dcf7; align-self:flex-end; max-width:80%; }
+  .search { font-size:12px; color:var(--muted); }
+  .body a { color:var(--accent); }
+  .msg h1 { font-size:18px; }
+  .msg h2 { font-size:16px; }
+  .msg h3 { font-size:15px; }
+  .msg h4 { font-size:14px; }
+  .msg h1, .msg h2, .msg h3, .msg h4 { font-weight:600; margin:8px 0 4px; }
+  .msg p { margin:4px 0; }
+  .msg ul, .msg ol { margin:4px 0 4px 20px; padding:0; }
+  .msg pre { background:#f0f2f5; padding:8px 10px; border-radius:6px; overflow-x:auto; font-size:12px; }
+  .msg code { font-family: ui-monospace, Menlo, monospace; font-size:12px; background:#f0f2f5; padding:1px 4px; border-radius:4px; }
+  .msg pre code { background:none; padding:0; }
+  form { position:sticky; bottom:0; margin-top:16px; padding:12px 0; background:var(--bg); display:flex; gap:8px; }
+  input, button { font: inherit; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); }
+  input { flex:1; }
+  button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  .err { color:#cf222e; }
+</style>
+</head>
+<body>
+<header>
+  <h1>KUDOS RAG Agent</h1>
+  <button id="reset" type="button">새 대화</button>
+  <span id="health" aria-live="polite">상태 확인 중…</span>
+</header>
+<main>
+  <div id="log"></div>
+  <form id="form">
+    <input id="question" placeholder="예: 메시지 등록 API 호출 방법 알려줘" autocomplete="off" aria-label="질문" required>
+    <button id="send" type="submit">질문</button>
+  </form>
+</main>
+<script>
+const log = document.getElementById('log');
+const form = document.getElementById('form');
+const input = document.getElementById('question');
+const sendBtn = document.getElementById('send');
+const resetBtn = document.getElementById('reset');
+
+// 대화 식별자는 브라우저가 만든다. 서버는 thread_id 로만 대화를 구분한다
+let threadId = crypto.randomUUID();
+
+async function refreshHealth() {
+  try {
+    const r = await fetch('/check');
+    const h = await r.json();
+    document.getElementById('health').textContent =
+      `상태: ${h.status} · RAG ${h.rag ? '연결됨' : '끊김'} · Ollama ${h.ollama ? '연결됨' : '끊김'}`;
+  } catch (e) {
+    document.getElementById('health').textContent = '상태 확인 실패';
+  }
+}
+refreshHealth();
+
+function addMessage(cls, text) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  el.textContent = text;
+  log.appendChild(el);
+  el.scrollIntoView({ block: 'end' });
+  return el;
+}
+
+// 답변 말풍선: [검색] 줄들이 위에, 본문이 아래에 쌓인다
+function addAnswer() {
+  const wrap = addMessage('a', '');
+  const body = document.createElement('div');
+  body.className = 'body';
+  wrap.appendChild(body);
+  return { wrap, body };
+}
+
+function addSearchLine(wrap, data) {
+  const line = document.createElement('div');
+  line.className = 'search';
+  line.textContent = `[검색] ${data.tool}(${data.query})`;
+  wrap.insertBefore(line, wrap.lastChild);
+  wrap.scrollIntoView({ block: 'end' });
+}
+
+// 답변이 끝난 뒤 본문의 url 을 링크로 바꾼다. HTML 문자열 삽입 없이 텍스트 노드를 쪼개 DOM 으로만 만든다
+function linkifyUrls(container) {
+  const re = /https?:\/\/[^\s)\]]+/g;
+  for (const node of Array.from(container.childNodes)) {
+    if (node.nodeType !== Node.TEXT_NODE) continue;
+    const text = node.nodeValue;
+    re.lastIndex = 0;
+    if (!re.test(text)) continue;
+    re.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const a = document.createElement('a');
+      a.href = m[0]; a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = m[0];
+      frag.appendChild(a);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    container.replaceChild(frag, node);
+  }
+}
+
+// 422 는 detail 이 [{loc, msg, type}] 배열, 그 외는 문자열이다
+function formatDetail(detail, fallback) {
+  if (Array.isArray(detail)) return detail.map(d => d.msg).join(', ');
+  return detail || fallback;
+}
+
+// --- 소형 마크다운 렌더러 (외부 라이브러리 없이 DOM API 로만 만든다) ---
+
+const RE_FENCE = /^\s*```/;
+const RE_HEADING = /^(#{1,4})\s+(.+)$/;
+const RE_UL = /^(\s*)[-*]\s+(.+)$/;
+const RE_OL = /^(\s*)\d+[.)]\s+(.+)$/;
+// 인라인 코드 → 굵게 → 마크다운 링크 순으로 번갈아 잡는다. 링크는 http(s) 만 허용(javascript: 차단)
+const RE_INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\((https?:\/\/[^\s)]+)\))/g;
+
+// 한 줄을 파싱해 parent 에 노드로 붙인다. 남은 맨 url 은 linkifyUrls 가 링크로 만든다
+function renderInline(text, parent) {
+  let last = 0, m;
+  RE_INLINE.lastIndex = 0;
+  while ((m = RE_INLINE.exec(text)) !== null) {
+    if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+    if (m[1]) {
+      const code = document.createElement('code');
+      code.textContent = m[1].slice(1, -1);
+      parent.appendChild(code);
+    } else if (m[2]) {
+      const strong = document.createElement('strong');
+      strong.textContent = m[2].slice(2, -2);
+      parent.appendChild(strong);
+    } else {
+      const a = document.createElement('a');
+      a.href = m[4]; a.target = '_blank'; a.rel = 'noopener';
+      a.textContent = m[3].slice(1, m[3].lastIndexOf(']('));
+      parent.appendChild(a);
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+  linkifyUrls(parent);  // 코드·굵게·링크는 자식 요소라 텍스트 노드만 도는 linkifyUrls 가 건드리지 않는다
+}
+
+function isBlockStart(line) {
+  return RE_FENCE.test(line) || RE_HEADING.test(line) || RE_UL.test(line) || RE_OL.test(line);
+}
+
+// 연속된 목록 줄 묶음을 <ul>/<ol> 로 만든다. 앞 공백 2칸 이상은 1단 중첩까지만 지원
+function renderList(lines, start, parent) {
+  const topIsUl = RE_UL.test(lines[start]);
+  const list = document.createElement(topIsUl ? 'ul' : 'ol');
+  let i = start, nested = null;
+  while (i < lines.length) {
+    const isUl = RE_UL.test(lines[i]);
+    const m = lines[i].match(isUl ? RE_UL : RE_OL);
+    if (!m) break;
+    const indent = m[1].length;
+    if (indent < 2 && isUl !== topIsUl) break;  // 같은 단계에서 종류가 바뀌면 새 목록으로
+    const li = document.createElement('li');
+    renderInline(m[2], li);
+    if (indent >= 2) {
+      if (!nested) {
+        nested = document.createElement(isUl ? 'ul' : 'ol');
+        (list.lastChild || list).appendChild(nested);
+      }
+      nested.appendChild(li);
+    } else {
+      nested = null;
+      list.appendChild(li);
+    }
+    i++;
+  }
+  parent.appendChild(list);
+  return i;
+}
+
+// 답변 원문(raw)을 DocumentFragment 로 렌더한다. 표·인용 등 미지원 문법은 원문 그대로 문단에 남는다
+function renderMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = text.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (RE_FENCE.test(line)) {                       // 코드 블록: 서식·링크를 적용하지 않는다
+      const buf = [];
+      i++;
+      while (i < lines.length && !RE_FENCE.test(lines[i])) { buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;                     // 닫는 ```
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.textContent = buf.join('\n');
+      pre.appendChild(code);
+      frag.appendChild(pre);
+      continue;
+    }
+    const heading = line.match(RE_HEADING);
+    if (heading) {
+      const el = document.createElement('h' + heading[1].length);
+      renderInline(heading[2], el);
+      frag.appendChild(el);
+      i++;
+      continue;
+    }
+    if (RE_UL.test(line) || RE_OL.test(line)) { i = renderList(lines, i, frag); continue; }
+    if (!line.trim()) { i++; continue; }             // 빈 줄은 문단 구분자
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) { buf.push(lines[i]); i++; }
+    const p = document.createElement('p');
+    buf.forEach((l, idx) => {                        // 문단 안 줄바꿈은 <br> 이 담당한다
+      if (idx) p.appendChild(document.createElement('br'));
+      renderInline(l, p);
+    });
+    frag.appendChild(p);
+  }
+  return frag;
+}
+
+// POST 기반 SSE: EventSource 는 GET 만 지원하므로 fetch 스트림을 직접 파싱한다
+async function ask(message) {
+  const { wrap, body } = addAnswer();
+  const res = await fetch('/v1/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thread_id: threadId, message }),
+  });
+  if (!res.ok) {
+    const detail = formatDetail((await res.json().catch(() => ({}))).detail, res.statusText);
+    body.classList.add('err'); body.textContent = `오류 ${res.status}: ${detail}`;
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let raw = '';       // 답변 원문(마크다운). 화면은 항상 renderMarkdown(raw) 결과로 교체한다
+  let ended = false;  // done/error 로 정상 종결됐는지. 없이 끊기면 중단 안내를 붙인다
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const block = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+      const evLine = block.split('\n').find(l => l.startsWith('event: '));
+      const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+      if (!evLine || !dataLine) continue;
+      const event = evLine.slice(7);
+      const data = JSON.parse(dataLine.slice(6));
+      if (event === 'token') {
+        raw += data;
+        body.replaceChildren(renderMarkdown(raw));
+        wrap.scrollIntoView({ block: 'end' });
+      }
+      else if (event === 'search') {
+        // search 앞의 token 은 도구 호출 직전 멘트다. 최종 답변에 섞이지 않도록 비운다
+        raw = '';
+        body.replaceChildren();
+        addSearchLine(wrap, data);
+      }
+      else if (event === 'error') { ended = true; body.classList.add('err'); body.appendChild(document.createTextNode(data)); }
+      else if (event === 'done') ended = true;
+    }
+  }
+  if (!ended) { body.classList.add('err'); body.appendChild(document.createTextNode('\n응답이 중단되었습니다.')); }
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = input.value.trim();
+  if (!q) return;
+  addMessage('q', q);
+  input.value = '';
+  sendBtn.disabled = true;
+  input.disabled = true;
+  resetBtn.disabled = true;  // 답변 도중 새 대화로 화면을 비우면 입력이 잠긴 빈 화면이 남는다
+  try { await ask(q); }
+  catch (err) { addMessage('a err', '요청 실패: ' + err.message); }
+  finally { sendBtn.disabled = false; input.disabled = false; resetBtn.disabled = false; input.focus(); }
+});
+
+resetBtn.addEventListener('click', () => {
+  threadId = crypto.randomUUID();
+  log.textContent = '';
+  input.focus();
+});
+</script>
+</body>
+</html>

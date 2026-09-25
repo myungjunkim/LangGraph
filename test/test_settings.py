@@ -18,6 +18,8 @@ def test_load_settings_reads_all_keys(write_config):
         temperature=0.0,
         llm_timeout=120.0,
         recursion_limit=12,
+        host="127.0.0.1",
+        port=5020,
     )
 
 
@@ -30,6 +32,8 @@ def test_load_settings_converts_types(write_config):
     assert isinstance(settings.temperature, float)
     assert isinstance(settings.llm_timeout, float)
     assert isinstance(settings.recursion_limit, int)
+    assert isinstance(settings.host, str)
+    assert isinstance(settings.port, int)
 
 
 def test_settings_is_frozen(write_config):
@@ -51,6 +55,12 @@ def test_load_settings_missing_key_raises(write_config):
 
 def test_load_settings_missing_section_raises(write_config):
     text = CONFIG_TEXT.replace("[agent]\nrecursion-limit=12\n", "")
+    with pytest.raises(KeyError):
+        load_settings(write_config(text))
+
+
+def test_load_settings_missing_fastapi_section_raises(write_config):
+    text = CONFIG_TEXT.replace("[fastapi]\nhost=127.0.0.1\nport=5020\n", "")
     with pytest.raises(KeyError):
         load_settings(write_config(text))
 

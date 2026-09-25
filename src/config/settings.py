@@ -18,6 +18,8 @@ class Settings:
     temperature: float
     llm_timeout: float
     recursion_limit: int
+    host: str
+    port: int
 
 
 def config_path_for(profile: str) -> Path:
@@ -39,6 +41,7 @@ def load_settings(path: str | Path) -> Settings:
     rag = parser["rag"]
     ollama = parser["ollama"]
     agent = parser["agent"]
+    fastapi = parser["fastapi"]
     return Settings(
         rag_base_url=rag["base-url"],
         rag_search_path=rag["search-path"],
@@ -50,4 +53,6 @@ def load_settings(path: str | Path) -> Settings:
         temperature=float(ollama["temperature"]),
         llm_timeout=float(ollama["llm-timeout"]),
         recursion_limit=int(agent["recursion-limit"]),
+        host=fastapi["host"],
+        port=int(fastapi["port"]),
     )

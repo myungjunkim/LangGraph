@@ -2,7 +2,7 @@
 
 - 작성일: 2026-09-22
 - 작성자: 리드
-- 상태: READY FOR REVIEW (2026-09-22, 리드 확인) — 커밋 대기(사용자)
+- 상태: 종결 — RAG·LangGraph 모두 사용자 커밋 완료 (2026-09-22, LangGraph 는 `git status` 로 `origin/main` 동기화 확인, RAG 는 사용자 보고)
 - 관련 저장소: `/Users/mjkim/workspace/LangGraph`(신규, 에이전트) · `/Users/mjkim/workspace/RAG`(기존, 검색 엔드포인트 1개 추가)
 
 ## 목표

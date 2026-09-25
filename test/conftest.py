@@ -18,6 +18,10 @@ llm-timeout=120
 
 [agent]
 recursion-limit=12
+
+[fastapi]
+host=127.0.0.1
+port=5020
 """
 
 

@@ -1,11 +1,23 @@
 """검색 도구를 쓰는 ReAct 형태의 LangGraph 그래프."""
+import httpx
+import ollama
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+
+from src.config.settings import Settings
+from src.llm_factory import create_chat_model
+from src.rag_client import RagClient
+from src.tools import build_tools
+
+# 진입점(CLI/웹)이 한 턴을 감싸며 잡는 런타임 오류
+RUNTIME_ERRORS = (httpx.HTTPError, ollama.ResponseError, ConnectionError, GraphRecursionError)
 
 SYSTEM_PROMPT = """당신은 팀 내부 문서(Confluence)와 사내 API 명세(OpenAPI)를 근거로 답하는 어시스턴트입니다.
 
@@ -37,3 +49,10 @@ def build_graph(chat_model: BaseChatModel, tools: list[BaseTool],
     graph.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     return graph.compile(checkpointer=checkpointer)
+
+
+def build_default_graph(settings: Settings) -> CompiledStateGraph:
+    """설정만으로 기본 구성(RAG 검색 도구 + Ollama + InMemorySaver)의 그래프를 만든다."""
+    client = RagClient(settings.rag_base_url, settings.rag_search_path, settings.rag_timeout)
+    tools = build_tools(client, settings.rag_top_k)
+    return build_graph(create_chat_model(settings), tools, InMemorySaver())

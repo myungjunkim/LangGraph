@@ -4,6 +4,8 @@
 #
 #    pip-compile --no-index --output-file=requirements.txt requirements.in
 #
+annotated-doc==0.0.5
+    # via fastapi
 annotated-types==0.8.0
     # via pydantic
 anyio==4.15.1
@@ -11,6 +13,7 @@ anyio==4.15.1
     #   httpx
     #   httpx2
     #   langsmith
+    #   starlette
 build==1.6.1
     # via pip-tools
 certifi==2026.7.22
@@ -21,13 +24,18 @@ certifi==2026.7.22
 charset-normalizer==3.5.1
     # via requests
 click==8.5.0
-    # via pip-tools
+    # via
+    #   pip-tools
+    #   uvicorn
 distro==1.9.0
     # via langsmith
+fastapi==0.141.1
+    # via -r requirements.in
 h11==0.16.0
     # via
     #   httpcore
     #   httpcore2
+    #   uvicorn
 httpcore==1.0.9
     # via httpx
 httpcore2==2.13.0
@@ -70,10 +78,13 @@ langgraph==1.2.12
     # via -r requirements.in
 langgraph-checkpoint==4.2.0
     # via
+    #   -r requirements.in
     #   langgraph
     #   langgraph-prebuilt
 langgraph-prebuilt==1.1.0
-    # via langgraph
+    # via
+    #   -r requirements.in
+    #   langgraph
 langgraph-sdk==0.4.5
     # via langgraph
 langsmith==0.14.0
@@ -101,6 +112,8 @@ pluggy==1.6.0
     # via pytest
 pydantic==2.13.5
     # via
+    #   -r requirements.in
+    #   fastapi
     #   langchain-core
     #   langgraph
     #   langsmith
@@ -125,6 +138,8 @@ requests-toolbelt==1.0.0
     # via langsmith
 sniffio==1.3.1
     # via langsmith
+starlette==1.6.0
+    # via fastapi
 tenacity==9.1.4
     # via langchain-core
 truststore==0.10.4
@@ -134,21 +149,27 @@ truststore==0.10.4
 typing-extensions==4.16.0
     # via
     #   anyio
+    #   fastapi
     #   httpx2
     #   langchain-core
     #   langchain-protocol
     #   langsmith
     #   pydantic
     #   pydantic-core
+    #   starlette
     #   typing-inspection
 typing-inspection==0.4.4
-    # via pydantic
+    # via
+    #   fastapi
+    #   pydantic
 urllib3==2.8.0
     # via requests
 uuid-utils==0.17.1
     # via
     #   langchain-core
     #   langsmith
+uvicorn==0.53.0
+    # via -r requirements.in
 websockets==16.1.1
     # via
     #   langgraph-sdk

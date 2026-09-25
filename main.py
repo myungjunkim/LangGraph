@@ -6,19 +6,12 @@ import argparse
 import uuid
 
 import httpx
-import ollama
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.errors import GraphRecursionError
 
-from src.agent import build_graph
+from src.agent import RUNTIME_ERRORS, build_default_graph
 from src.config.settings import config_path_for, load_settings
-from src.llm_factory import create_chat_model
-from src.rag_client import RagClient
-from src.tools import build_tools
 
 EXIT_COMMANDS = ("exit", "quit")
-RUNTIME_ERRORS = (httpx.HTTPError, ollama.ResponseError, ConnectionError, GraphRecursionError)
 
 
 def run_turn(graph, config: dict, text: str, out=print) -> None:
@@ -41,19 +34,13 @@ def warn_if_rag_down(base_url: str, timeout: float, out=print) -> None:
         out(f"[경고] RAG 서버({base_url}) 상태 확인에 실패했습니다. 검색 도구가 동작하지 않을 수 있습니다. ({e})")
 
 
-def build_repl_graph(settings):
-    client = RagClient(settings.rag_base_url, settings.rag_search_path, settings.rag_timeout)
-    tools = build_tools(client, settings.rag_top_k)
-    return build_graph(create_chat_model(settings), tools, InMemorySaver())
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="KUDOS RAG 검색 에이전트 CLI")
     parser.add_argument("--active-profile", default="local", help="resources/config_{profile}.ini 프로파일 이름")
     args = parser.parse_args()
 
     settings = load_settings(config_path_for(args.active_profile))
-    graph = build_repl_graph(settings)
+    graph = build_default_graph(settings)
     config = {"configurable": {"thread_id": str(uuid.uuid4())}, "recursion_limit": settings.recursion_limit}
 
     warn_if_rag_down(settings.rag_base_url, settings.rag_timeout)
