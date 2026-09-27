@@ -71,39 +71,42 @@ def _turn_queries(graph, thread_id: str, settings, first: str, second: str) -> t
     return queries, state["messages"][-1].content
 
 
-@pytest.mark.parametrize("first, keyword, foreign", [
-    ("gpts 등록 API 알려줘", "gpts", "메시지"),
-    pytest.param("메시지 등록 API 알려줘", "메시지 등록", "gpts",
-                 marks=pytest.mark.xfail(strict=False,
-                                         reason="후속 질문 검색어에 대상 누락 — agent-07")),
+# 대상 표기 집합: 1턴 답변에 실제로 등장하는 표기 중 하나라도 검색어에 있으면 "대상 유지"로 본다.
+# 메시지 케이스의 1턴 답변에는 `Message Management API`, `/v1/messages/message` 가 나온다(agent-08 (3)).
+GPTS_SUBJECT = ("gpts",)
+MESSAGE_SUBJECT = ("메시지 등록", "message")
+
+
+@pytest.mark.parametrize("first, subject, foreign", [
+    ("gpts 등록 API 알려줘", GPTS_SUBJECT, ("메시지", "message")),
+    ("메시지 등록 API 알려줘", MESSAGE_SUBJECT, GPTS_SUBJECT),
 ])
 def test_followup_question_query_keeps_the_subject_of_the_previous_turn(live_env, capsys,
-                                                                       first, keyword, foreign):
+                                                                       first, subject, foreign):
     """후속 질문의 검색어가 대화에 없던 이름으로 오염되지 않고, 앞 대화의 대상을 유지해야 한다.
 
-    agent-06 P4(회차 3 기준): 오염 없음은 2종 모두 필수, 대상 유지는 gpts 필수 /
-    메시지 등록은 미해결(xfail, agent-07 에서 처리)이지만 단언은 남겨 회복을 감지한다.
+    agent-08 (3) 기준: 오염 없음(다른 케이스 표기 미포함)과 대상 유지(대화에 등장한 표기 중
+    하나 이상 포함)를 2종 모두 필수로 본다. 비교는 `q.lower()` 로 표기 차이만 흡수한다.
     """
     from src.agent import build_default_graph
 
-    thread_id = f"agent-06-p4-{keyword}"
+    thread_id = f"agent-08-p4-{subject[0]}"
     settings = live_env
     queries, _ = _turn_queries(build_default_graph(settings), thread_id, settings,
                                first,
                                "방금 알려준 API의 v1이랑 v2 차이는 뭐야?")
 
     with capsys.disabled():
-        print(f"\n[P4-{keyword}] 2턴 검색어 {queries}")
+        print(f"\n[P4-{subject[0]}] 2턴 검색어 {queries}")
     assert queries, "2턴에서 도구를 호출하지 않았다 — 이 질문은 검색이 필요하다"
-    assert all(foreign not in q.lower() for q in queries), \
+    assert all(not any(f in q.lower() for f in foreign) for q in queries), \
         f"앞 대화에 없던 이름 오염: foreign={foreign!r} queries={queries}"
-    # 핵심어는 소문자로 준다(한글은 lower() 영향 없음, `GPTs` 같은 표기 차이만 흡수)
-    assert all(keyword in q.lower() for q in queries), \
-        f"대상 누락: keyword={keyword!r} queries={queries}"
+    assert all(any(s in q.lower() for s in subject) for q in queries), \
+        f"대상 누락: subject={subject!r} queries={queries}"
 
 
 def test_followup_question_reuses_context_without_losing_the_api_name(live_env, capsys):
-    """B8 멀티턴 케이스: 재검색을 하지 않거나, 하더라도 대상(메시지 등록)을 검색어에 남긴다(agent-06 P6)."""
+    """B8 멀티턴 케이스: 재검색을 하지 않거나, 하더라도 대상 표기를 검색어에 남긴다(agent-06 P6, agent-08 (3) 기준)."""
     from src.agent import build_default_graph
 
     settings = live_env
@@ -113,4 +116,5 @@ def test_followup_question_reuses_context_without_losing_the_api_name(live_env, 
 
     with capsys.disabled():
         print(f"\n[P6] 2턴 검색어 {queries}, 답변 {len(answer)}자")
-    assert not queries or any("메시지 등록" in q for q in queries), f"queries={queries}"
+    assert not queries or any(any(s in q.lower() for s in MESSAGE_SUBJECT) for q in queries), \
+        f"queries={queries}"

@@ -70,3 +70,24 @@ def test_warn_if_rag_down_warns_on_error_status(monkeypatch):
     lines = []
     main.warn_if_rag_down("http://rag.test/", 3, out=lines.append)
     assert len(lines) == 1 and lines[0].startswith("[경고]")
+
+
+# --- agent-08 보강 (Validator): 후속 턴에서도 CLI 출력이 그대로다 ---
+
+def test_run_turn_output_is_unchanged_on_followup_turn():
+    """rewrite 노드가 붙어도 후속 턴 CLI 출력은 검색 줄과 최종 답변뿐이다."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    rewritten = "메시지 등록 API의 v1과 v2 차이"
+    graph, _ = _graph([
+        AIMessage("POST /v1/messages 입니다."),      # 1턴 agent
+        AIMessage(rewritten),                        # 2턴 rewrite
+        _tool_call_message(query=rewritten),         # 2턴 agent (도구 호출)
+        AIMessage("v1 과 v2 차이는 …"),               # 2턴 agent (최종 답변)
+    ], checkpointer=InMemorySaver())
+
+    assert _collect(graph, "메시지 등록 API 알려줘") == ["POST /v1/messages 입니다."]
+    assert _collect(graph, "방금 알려준 API의 v1이랑 v2 차이는?") == [
+        f"[검색] search_openapi({rewritten})",
+        "v1 과 v2 차이는 …",
+    ]

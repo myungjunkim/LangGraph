@@ -2,7 +2,7 @@
 import httpx
 import ollama
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
@@ -32,22 +32,57 @@ SYSTEM_PROMPT = """당신은 팀 내부 문서(Confluence)와 사내 API 명세(
 6. 답변 끝에 `출처:` 목록으로 사용한 문서의 제목과 url 을 적습니다.
 7. 한국어로 간결하게 답합니다."""
 
+REWRITE_PROMPT = """다음은 사용자와 어시스턴트의 대화입니다. 마지막 사용자 질문을 앞 대화 없이도 이해되도록 한 문장으로 다시 쓰세요.
+규칙:
+1. 앞 대화에서 다룬 대상(API 이름, 경로, 기능명, 문서 제목)을 질문에 명시합니다.
+2. 대화에 나오지 않은 이름은 넣지 않습니다.
+3. 질문의 의도는 바꾸지 않습니다.
+4. 다시 쓴 질문 한 문장만 출력합니다. 설명·따옴표·접두어 없이."""
+
+HINT_PREFIX = "[이번 질문의 독립 표현] "
+
+
+class AgentState(MessagesState):
+    """MessagesState + 후속 질문의 독립 표현. messages 자체는 rewrite 가 건드리지 않는다."""
+
+    standalone_question: str
+
 
 def build_graph(chat_model: BaseChatModel, tools: list[BaseTool],
                 checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
     model_with_tools = chat_model.bind_tools(tools)
 
-    def agent(state: MessagesState) -> dict:
+    def rewrite(state: AgentState) -> dict:
+        """후속 질문을 앞 대화 없이도 이해되는 한 문장으로 다시 쓴다. 첫 턴은 LLM 을 호출하지 않는다."""
+        messages = state["messages"]
+        if len([m for m in messages if isinstance(m, HumanMessage)]) < 2:
+            return {"standalone_question": ""}
+        # ToolMessage(청크 원문)와 tool_call 전용 AIMessage 는 제외 — 컨텍스트 절약
+        history = [m for m in messages
+                   if isinstance(m, HumanMessage)
+                   or (isinstance(m, AIMessage) and not m.tool_calls and m.content)]
+        # 도구를 붙이지 않은 원본 모델로 호출한다(리라이팅에서 도구 호출이 나오면 안 된다)
+        response = chat_model.invoke([SystemMessage(REWRITE_PROMPT)] + history)
+        return {"standalone_question": response.content.strip()}
+
+    def agent(state: AgentState) -> dict:
         # SystemMessage 는 상태에 저장하지 않고 호출 때마다 앞에 붙인다
-        response = model_with_tools.invoke([SystemMessage(SYSTEM_PROMPT)] + state["messages"])
+        system = SYSTEM_PROMPT
+        if state.get("standalone_question"):
+            system += ("\n\n" + HINT_PREFIX + state["standalone_question"]
+                       + "\n검색이 필요할 때 query 는 이 독립 표현을 기준으로 만듭니다."
+                       + " 앞 대화의 답변만으로 충분하면 검색하지 않아도 됩니다.")
+        response = model_with_tools.invoke([SystemMessage(system)] + state["messages"])
         return {"messages": [response]}
 
-    graph = StateGraph(MessagesState)
+    graph = StateGraph(AgentState)
+    graph.add_node("rewrite", rewrite)
     graph.add_node("agent", agent)
     # langgraph-prebuilt 1.1.0 의 기본 핸들러는 ToolInvocationError 만 흡수하고 나머지는 다시 던진다.
     # 검색 도구 예외(RAG 서버 장애 등)도 ToolMessage 로 바꿔 LLM 이 인지하도록 True 를 명시한다.
     graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
-    graph.add_edge(START, "agent")
+    graph.add_edge(START, "rewrite")
+    graph.add_edge("rewrite", "agent")
     graph.add_conditional_edges("agent", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     return graph.compile(checkpointer=checkpointer)

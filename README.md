@@ -7,8 +7,9 @@
 main.py (CLI REPL)  |  web.py (FastAPI + 브라우저 UI, SSE)
    │ graph.stream / graph.astream(HumanMessage, thread_id)
    ▼
-StateGraph(MessagesState)
-   agent ──(tool_calls 있음)──► tools(ToolNode) ──► agent ──(없음)──► END
+StateGraph(AgentState)
+   rewrite ──► agent ──(tool_calls 있음)──► tools(ToolNode) ──► agent ──(없음)──► END
+     │ 후속 질문을 독립 질문으로 다시 씀(첫 턴은 우회)
      │ ChatOllama(qwen3:14b).bind_tools([...])      ├─ search_confluence(query)
      │                                              └─ search_openapi(query)
      │                                                   └─ POST /v1/search (RAG 서버)
@@ -153,6 +154,7 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `src/tools.py` | `build_tools(client, top_k)` — `search_confluence`, `search_openapi` |
 | `web.py` | 웹 진입점, `uvicorn.run(create_app(graph, settings))` |
 | `src/agent.py` | `SYSTEM_PROMPT`, `build_graph(chat_model, tools, checkpointer)`, `build_default_graph(settings)`, `RUNTIME_ERRORS` |
+| `src/agent.py` 의 `rewrite` 노드 | 후속 질문을 앞 대화 없이도 이해되는 독립 질문(`REWRITE_PROMPT`)으로 다시 써 agent 에 힌트로 전달. 첫 턴은 LLM 호출 없이 우회 |
 | `src/web/app.py` | `create_app`, `stream_events`(SSE), `check_rag`/`check_ollama` |
 | `src/web/dto.py` | `ChatRequest`, `HealthResponse` |
 | `resources/static/index.html` | 단일 파일 채팅 UI(외부 CDN 없음) |

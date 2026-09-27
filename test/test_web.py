@@ -350,3 +350,51 @@ def test_static_mount_serves_index_html(settings):
     res = client.get("/static/index.html")
     assert res.status_code == 200
     assert "<title>KUDOS RAG Agent" in res.text
+
+
+# --- agent-08: rewrite 노드가 SSE 로 새어 나오지 않는다 ---
+
+def test_rewrite_output_is_not_streamed_as_token(settings):
+    """R4. 후속 턴에서 rewrite 응답은 token 에도 search 에도 나타나지 않는다."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    rewritten = "메시지 등록 API의 v1과 v2 차이"
+    client, _ = _app([
+        _tool_call_message(query="메시지 등록 API"),   # 1턴 agent (도구 호출)
+        AIMessage("POST /v1/messages 입니다."),        # 1턴 agent (최종 답변)
+        AIMessage(rewritten),                          # 2턴 rewrite
+        AIMessage(ANSWER),                             # 2턴 agent
+    ], checkpointer=InMemorySaver(), settings=settings)
+
+    _post(client, "메시지 등록 API 알려줘", thread_id="same")
+    frames = _frames(_post(client, "방금 알려준 API의 v1이랑 v2 차이는?", thread_id="same"))
+
+    names = [name for name, _ in frames]
+    assert names[-1] == "done"
+    tokens = "".join(data for name, data in frames if name == "token")
+    assert rewritten not in tokens
+    assert tokens == ANSWER
+    assert [data for name, data in frames if name == "search"] == []
+
+
+def test_rewrite_turn_keeps_search_then_token_order(settings):
+    """R4. 힌트가 붙은 턴에서도 search → token → done 순서와 token 합이 그대로다."""
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    rewritten = "메시지 등록 API의 필수 필드"
+    client, _ = _app([
+        AIMessage("1턴 답변"),                              # 1턴 agent
+        AIMessage(rewritten),                               # 2턴 rewrite
+        _tool_call_message(query=rewritten),                # 2턴 agent (도구 호출)
+        AIMessage(ANSWER),                                  # 2턴 agent (최종 답변)
+    ], checkpointer=InMemorySaver(), settings=settings)
+
+    _post(client, "메시지 등록 API 알려줘", thread_id="same")
+    frames = _frames(_post(client, "그 API 필수 필드는?", thread_id="same"))
+
+    names = [name for name, _ in frames]
+    assert names.index("search") < names.index("token")
+    assert names[-1] == "done"
+    assert [data for name, data in frames if name == "search"] == [
+        {"tool": "search_openapi", "query": rewritten}]
+    assert "".join(data for name, data in frames if name == "token") == ANSWER
