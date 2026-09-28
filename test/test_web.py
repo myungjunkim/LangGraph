@@ -267,10 +267,10 @@ def test_max_lengths_are_accepted(settings):
     assert res.status_code == 200
 
 
-def test_openapi_lists_only_two_paths(settings):
+def test_openapi_lists_only_public_paths(settings):
     client, _ = _app([AIMessage("답")], settings=settings)
     spec = client.get("/openapi.json").json()
-    assert sorted(spec["paths"]) == ["/check", "/v1/chat/stream"]
+    assert sorted(spec["paths"]) == ["/check", "/v1/chat/stream", "/v1/threads/{thread_id}/messages"]
     assert "/" not in spec["paths"]  # include_in_schema=False
 
 
@@ -398,3 +398,107 @@ def test_rewrite_turn_keeps_search_then_token_order(settings):
     assert [data for name, data in frames if name == "search"] == [
         {"tool": "search_openapi", "query": rewritten}]
     assert "".join(data for name, data in frames if name == "token") == ANSWER
+
+
+# --- agent-09: 대화 복원용 히스토리 API ---
+
+def test_thread_messages_returns_questions_and_answers(settings):
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    rag = FakeClient([_chunk()])
+    client, _ = _app([
+        _tool_call_message(query="메시지 등록 API"),   # 도구 호출 AIMessage — 제외 대상
+        AIMessage("POST /v1/messages 입니다."),        # 1턴 답변
+        AIMessage("독립 질문"),                        # 2턴 rewrite — 대화 기록에 없음
+        AIMessage("v1 과 v2 는 …"),                    # 2턴 답변
+    ], client=rag, checkpointer=InMemorySaver(), settings=settings)
+
+    _post(client, "메시지 등록 API 알려줘", thread_id="keep")
+    _post(client, "v1 이랑 v2 차이는?", thread_id="keep")
+
+    body = client.get("/v1/threads/keep/messages").json()
+
+    assert body == {"messages": [
+        {"role": "user", "content": "메시지 등록 API 알려줘"},
+        {"role": "assistant", "content": "POST /v1/messages 입니다."},
+        {"role": "user", "content": "v1 이랑 v2 차이는?"},
+        {"role": "assistant", "content": "v1 과 v2 는 …"},
+    ]}
+
+
+def test_thread_messages_of_unknown_thread_is_empty(settings):
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    client, _ = _app([AIMessage("답")], checkpointer=InMemorySaver(), settings=settings)
+    res = client.get("/v1/threads/없는대화/messages")
+    assert res.status_code == 200 and res.json() == {"messages": []}
+
+
+@pytest.mark.parametrize("thread_id", ["", "x" * 65])
+def test_thread_messages_validates_thread_id(settings, thread_id):
+    client, _ = _app([AIMessage("답")], settings=settings)
+    res = client.get(f"/v1/threads/{thread_id}/messages")
+    assert res.status_code in (404, 422)      # 빈 문자열은 경로가 달라져 404, 65자는 422
+
+
+def test_thread_messages_max_length_is_accepted(settings):
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    client, _ = _app([AIMessage("답")], checkpointer=InMemorySaver(), settings=settings)
+    assert client.get(f"/v1/threads/{'x' * 64}/messages").status_code == 200
+
+
+def test_thread_messages_excludes_tool_records():
+    """변환 규칙 단위 확인: ToolMessage·tool_call 전용 AIMessage·빈 content 는 제외."""
+    from langchain_core.messages import ToolMessage
+
+    from src.web.app import to_thread_messages
+
+    messages = [
+        HumanMessage("질문"),
+        _tool_call_message(query="검색어"),
+        ToolMessage(content="청크 원문", name="search_openapi", tool_call_id="call_1"),
+        AIMessage(""),
+        AIMessage("답변"),
+    ]
+
+    assert [(m.role, m.content) for m in to_thread_messages(messages)] == [
+        ("user", "질문"), ("assistant", "답변")]
+
+
+def test_thread_messages_excludes_ai_message_that_also_has_tool_calls():
+    """content 가 있어도 tool_calls 가 붙은 AIMessage 는 최종 답변이 아니므로 제외한다."""
+    from src.web.app import to_thread_messages
+
+    thinking = AIMessage(content="먼저 검색해 볼게요.", tool_calls=[
+        {"name": "search_openapi", "args": {"query": "메시지 등록"}, "id": "c1"}])
+
+    assert [(m.role, m.content) for m in to_thread_messages([HumanMessage("질문"), thinking, AIMessage("답변")])] == [
+        ("user", "질문"), ("assistant", "답변")]
+
+
+def test_thread_messages_of_empty_state_is_empty_list():
+    from src.web.app import to_thread_messages
+
+    assert to_thread_messages([]) == []
+
+
+def test_thread_messages_rejects_too_long_thread_id_with_422(settings):
+    """65자는 라우팅은 되지만 검증에서 걸려 422 여야 한다(404 가 아님)."""
+    client, _ = _app([AIMessage("답")], settings=settings)
+    res = client.get(f"/v1/threads/{'x' * 65}/messages")
+
+    assert res.status_code == 422
+    assert res.json()["detail"][0]["loc"] == ["path", "thread_id"]
+
+
+def test_thread_messages_keeps_question_when_answer_is_missing():
+    """도구 기록만 남고 최종 답변이 없어도 질문은 복원된다."""
+    from langchain_core.messages import ToolMessage
+
+    from src.web.app import to_thread_messages
+
+    messages = [HumanMessage("질문"), _tool_call_message(query="검색어"),
+                ToolMessage(content="청크", name="search_openapi", tool_call_id="call_1")]
+
+    assert [(m.role, m.content) for m in to_thread_messages(messages)] == [("user", "질문")]

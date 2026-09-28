@@ -10,3 +10,4 @@ uvicorn
 langgraph-prebuilt
 langgraph-checkpoint
 pydantic
+langgraph-checkpoint-sqlite

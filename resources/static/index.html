@@ -56,8 +56,10 @@ const input = document.getElementById('question');
 const sendBtn = document.getElementById('send');
 const resetBtn = document.getElementById('reset');
 
-// 대화 식별자는 브라우저가 만든다. 서버는 thread_id 로만 대화를 구분한다
-let threadId = crypto.randomUUID();
+// 대화 식별자는 브라우저가 만든다. 서버는 thread_id 로만 대화를 구분한다.
+// localStorage 에 남겨 두면 새로고침·서버 재기동 뒤에도 같은 대화를 이어받는다
+let threadId = localStorage.getItem('kudos.threadId') || crypto.randomUUID();
+localStorage.setItem('kudos.threadId', threadId);
 
 async function refreshHealth() {
   try {
@@ -236,6 +238,26 @@ function renderMarkdown(text) {
   return frag;
 }
 
+// 서버에 남아 있는 이전 대화를 화면에 되살린다. 도구 호출 기록은 복원하지 않는다
+async function restoreHistory() {
+  let history;
+  try {
+    const res = await fetch(`/v1/threads/${encodeURIComponent(threadId)}/messages`);
+    if (!res.ok) return;
+    history = (await res.json()).messages;
+  } catch (e) {
+    return;                      // 서버가 없거나 응답이 이상하면 빈 화면(새 대화와 동일)
+  }
+  for (const m of history || []) {
+    if (m.role === 'user') addMessage('q', m.content);
+    else {
+      const { body } = addAnswer();
+      body.replaceChildren(renderMarkdown(m.content));
+    }
+  }
+}
+restoreHistory();
+
 // POST 기반 SSE: EventSource 는 GET 만 지원하므로 fetch 스트림을 직접 파싱한다
 async function ask(message) {
   const res = await fetch('/v1/chat/stream', {
@@ -301,6 +323,7 @@ form.addEventListener('submit', async (e) => {
 
 resetBtn.addEventListener('click', () => {
   threadId = crypto.randomUUID();
+  localStorage.setItem('kudos.threadId', threadId);
   log.textContent = '';
   input.focus();
 });

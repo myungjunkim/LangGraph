@@ -12,3 +12,13 @@ class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     rag: bool
     ollama: bool
+
+
+class ThreadMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ThreadMessagesResponse(BaseModel):
+    messages: list[ThreadMessage]
+

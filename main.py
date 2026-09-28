@@ -9,7 +9,8 @@ import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agent import RUNTIME_ERRORS, build_default_graph
-from src.config.settings import config_path_for, load_settings
+from src.checkpointer import sqlite_saver
+from src.config.settings import Settings, config_path_for, load_settings
 
 EXIT_COMMANDS = ("exit", "quit")
 
@@ -34,16 +35,24 @@ def warn_if_rag_down(base_url: str, timeout: float, out=print) -> None:
         out(f"[경고] RAG 서버({base_url}) 상태 확인에 실패했습니다. 검색 도구가 동작하지 않을 수 있습니다. ({e})")
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="KUDOS RAG 검색 에이전트 CLI")
     parser.add_argument("--active-profile", default="local", help="resources/config_{profile}.ini 프로파일 이름")
-    args = parser.parse_args()
+    parser.add_argument("--thread", default=None, help="이어서 할 대화 ID(생략하면 새 대화)")
+    return parser
 
-    settings = load_settings(config_path_for(args.active_profile))
-    graph = build_default_graph(settings)
-    config = {"configurable": {"thread_id": str(uuid.uuid4())}, "recursion_limit": settings.recursion_limit}
 
-    warn_if_rag_down(settings.rag_base_url, settings.rag_timeout)
+def turn_config(thread_id: str | None, settings: Settings) -> dict:
+    """대화 ID 를 주지 않으면 새 대화를 시작한다."""
+    return {"configurable": {"thread_id": thread_id or str(uuid.uuid4())},
+            "recursion_limit": settings.recursion_limit}
+
+
+def thread_notice(thread_id: str) -> str:
+    return f"대화 ID: {thread_id} (이어서 하려면 --thread {thread_id})"
+
+
+def repl(graph, config: dict) -> None:
     print("질문을 입력하세요. 종료: exit / quit / Ctrl-D")
     while True:
         try:
@@ -59,6 +68,19 @@ def main() -> None:
             run_turn(graph, config, text)
         except RUNTIME_ERRORS as e:
             print(f"[오류] {type(e).__name__}: {e}")
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+
+    settings = load_settings(config_path_for(args.active_profile))
+    config = turn_config(args.thread, settings)
+
+    warn_if_rag_down(settings.rag_base_url, settings.rag_timeout)
+    print(thread_notice(config["configurable"]["thread_id"]))
+    # 연결 수명은 이 with 블록이 관리한다(프로세스 종료까지 열려 있음)
+    with sqlite_saver(settings.checkpoint_db) as checkpointer:
+        repl(build_default_graph(settings, checkpointer), config)
 
 
 if __name__ == "__main__":

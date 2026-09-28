@@ -40,7 +40,9 @@ def test_fetch_targets_are_relative_paths():
     calls = re.findall(r"fetch\(\s*[`'\"]([^`'\"]+)", _script())
     assert calls, "fetch 호출을 찾지 못했다"
     assert all(url.startswith("/") for url in calls), calls
-    assert set(calls) == {"/check", "/v1/chat/stream"}
+    assert {"/check", "/v1/chat/stream"} <= set(calls)
+    assert any(u.startswith("/v1/threads/") for u in calls)   # 대화 복원(agent-09)
+    assert len(set(calls)) == 3
 
 
 def test_sse_event_names_match_server_contract():
@@ -63,7 +65,10 @@ def test_request_body_keys_match_chat_request():
 def test_thread_id_is_generated_in_browser():
     script = _script()
     assert script.count("crypto.randomUUID()") >= 2  # 최초 1회 + 새 대화
-    assert re.search(r"let\s+threadId\s*=\s*crypto\.randomUUID\(\)", script)
+    # 저장된 대화가 있으면 그 ID 를 이어받고, 없을 때만 새로 만든다(agent-09)
+    assert re.search(r"let\s+threadId\s*=\s*localStorage\.getItem\('kudos\.threadId'\)\s*\|\|\s*crypto\.randomUUID\(\)",
+                     script)
+    assert "localStorage.setItem('kudos.threadId', threadId)" in script
 
 
 def test_new_conversation_resets_thread_and_log():
@@ -683,3 +688,43 @@ def test_ask_fetch_failure_leaves_no_empty_answer_bubble():
 
     assert result["thrown"] == "Failed to fetch"
     assert result["added"] == 0
+
+
+# --- agent-09: 대화 이어하기(localStorage + 히스토리 복원) ---
+
+def test_thread_id_is_persisted_in_local_storage():
+    script = _script()
+    assert "localStorage.getItem('kudos.threadId')" in script
+    assert script.count("localStorage.setItem('kudos.threadId', threadId)") == 2  # 최초 + 새 대화
+
+
+def test_new_conversation_stores_new_thread_id():
+    listener = _script().split("resetBtn.addEventListener", 1)[1]
+    assert "threadId = crypto.randomUUID()" in listener
+    assert "localStorage.setItem('kudos.threadId', threadId)" in listener
+    assert re.search(r"log\.(textContent\s*=\s*''|replaceChildren\(\))", listener)
+
+
+def test_history_is_restored_on_load():
+    script = _script()
+    body = _function_body("restoreHistory")
+    assert "/v1/threads/" in body and "encodeURIComponent(threadId)" in body
+    assert "/messages" in body
+    assert "restoreHistory();" in script                      # 로드 시 1회 호출
+
+
+def test_restored_history_is_inserted_without_html_strings():
+    """복원한 대화도 textContent/renderMarkdown 으로만 그린다."""
+    body = _function_body("restoreHistory")
+    assert "addMessage('q'" in body                            # 질문 말풍선(textContent)
+    assert "renderMarkdown(m.content)" in body                 # 답변은 마크다운 렌더
+    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert forbidden not in body
+
+
+def test_history_failure_is_silent():
+    """서버가 없거나 응답이 이상하면 조용히 빈 화면(새 대화와 같음)으로 둔다."""
+    body = _function_body("restoreHistory")
+    assert "catch" in body
+    assert "return" in body
+    assert "요청 실패" not in body

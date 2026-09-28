@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from src.config.settings import PROJECT_ROOT, Settings, config_path_for, load_settings
@@ -20,6 +22,7 @@ def test_load_settings_reads_all_keys(write_config):
         recursion_limit=12,
         host="127.0.0.1",
         port=5020,
+        checkpoint_db=PROJECT_ROOT / "data" / "checkpoints.sqlite",
     )
 
 
@@ -34,6 +37,7 @@ def test_load_settings_converts_types(write_config):
     assert isinstance(settings.recursion_limit, int)
     assert isinstance(settings.host, str)
     assert isinstance(settings.port, int)
+    assert isinstance(settings.checkpoint_db, Path)
 
 
 def test_settings_is_frozen(write_config):
@@ -72,3 +76,32 @@ def test_config_path_for():
 def test_example_config_has_every_key():
     """example 템플릿만으로 Settings 를 만들 수 있어야 한다."""
     assert load_settings(PROJECT_ROOT / "resources" / "config_local.ini.example").llm_model == "qwen3:14b"
+
+
+def test_checkpoint_relative_path_is_resolved_from_project_root(write_config):
+    """상대 경로는 실행 디렉터리와 무관하게 프로젝트 루트 기준이어야 한다."""
+    settings = load_settings(write_config(CONFIG_TEXT.replace("db-path=data/checkpoints.sqlite",
+                                                              "db-path=data/sub/db.sqlite")))
+    assert settings.checkpoint_db == PROJECT_ROOT / "data" / "sub" / "db.sqlite"
+    assert settings.checkpoint_db.is_absolute()
+
+
+def test_checkpoint_absolute_path_is_kept(write_config, tmp_path):
+    absolute = tmp_path / "custom.sqlite"
+    settings = load_settings(write_config(CONFIG_TEXT.replace("db-path=data/checkpoints.sqlite",
+                                                              f"db-path={absolute}")))
+    assert settings.checkpoint_db == absolute
+
+
+def test_load_settings_missing_checkpoint_section_raises(write_config):
+    text = CONFIG_TEXT.replace("[checkpoint]\ndb-path=data/checkpoints.sqlite\n", "")
+    with pytest.raises(KeyError):
+        load_settings(write_config(text))
+
+
+
+def test_load_settings_missing_db_path_key_raises(write_config):
+    """섹션은 있는데 키가 없으면 기존 정책대로 KeyError 를 그대로 올린다."""
+    text = CONFIG_TEXT.replace("db-path=data/checkpoints.sqlite", "")
+    with pytest.raises(KeyError):
+        load_settings(write_config(text))

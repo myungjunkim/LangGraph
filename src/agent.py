@@ -88,8 +88,12 @@ def build_graph(chat_model: BaseChatModel, tools: list[BaseTool],
     return graph.compile(checkpointer=checkpointer)
 
 
-def build_default_graph(settings: Settings) -> CompiledStateGraph:
-    """설정만으로 기본 구성(RAG 검색 도구 + Ollama + InMemorySaver)의 그래프를 만든다."""
+def build_default_graph(settings: Settings,
+                       checkpointer: BaseCheckpointSaver | None = None) -> CompiledStateGraph:
+    """설정만으로 기본 구성(RAG 검색 도구 + Ollama)의 그래프를 만든다.
+
+    checkpointer 를 주지 않으면 기존대로 InMemorySaver(프로세스 종료 시 대화 소실)를 쓴다.
+    """
     client = RagClient(settings.rag_base_url, settings.rag_search_path, settings.rag_timeout)
     tools = build_tools(client, settings.rag_top_k)
-    return build_graph(create_chat_model(settings), tools, InMemorySaver())
+    return build_graph(create_chat_model(settings), tools, checkpointer or InMemorySaver())

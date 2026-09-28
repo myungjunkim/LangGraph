@@ -79,7 +79,8 @@ python main.py --active-profile=local
 
 - `> ` 프롬프트에 질문을 입력한다. `exit` / `quit` / Ctrl-D 로 종료한다.
 - 검색이 일어나면 `[검색] search_openapi(메시지 등록)` 처럼 한 줄이 먼저 출력되고, 이어서 최종 답변이 나온다.
-- 같은 프로세스 안에서는 대화가 이어진다(`thread_id` 프로세스당 1개).
+- 기동 시 `대화 ID: <uuid> (이어서 하려면 --thread <uuid>)` 가 출력된다. 프로세스를 끝낸 뒤
+  `python main.py --thread <uuid>` 로 다시 들어가면 그 대화를 이어서 할 수 있다. 생략하면 새 대화다.
 - 기동 시 RAG `GET /check` 를 한 번 호출해 실패하면 경고만 출력하고 계속 진행한다.
 
 ```
@@ -97,10 +98,12 @@ POST /v1/messages ...
 python web.py --active-profile=local     # http://127.0.0.1:5020
 ```
 
-- 라우트: `GET /`(채팅 UI), `GET /check`(상태), `POST /v1/chat/stream`(SSE 스트리밍 응답).
+- 라우트: `GET /`(채팅 UI), `GET /check`(상태), `POST /v1/chat/stream`(SSE 스트리밍 응답),
+  `GET /v1/threads/{thread_id}/messages`(이전 대화 복원용 질문·답변 목록).
 - 답변은 토큰 단위로 흘러나오고, 검색이 일어나면 답변 위에 `[검색] search_openapi(메시지 등록)` 줄이 먼저 표시된다.
-- 대화는 브라우저가 만든 `thread_id`(uuid) 로 구분한다. `새 대화` 버튼을 누르면 새 uuid 로 바뀌고 화면이 비워진다.
-  서버는 대화를 메모리(`InMemorySaver`)에만 두므로 서버를 재시작하면 모든 대화가 사라진다.
+- 대화는 브라우저가 만든 `thread_id`(uuid) 로 구분하고 `localStorage` 에 보관한다. 새로고침하거나 서버를 재시작해도
+  같은 대화를 이어받아, 페이지를 열 때 이전 질문·답변이 화면에 복원된다. `새 대화` 버튼을 누르면 새 uuid 로 바뀌고
+  화면이 비워진다(이전 대화는 DB 에 남아 있지만 ID 를 잃으면 다시 찾지 못한다).
 - **팀원에게 열어주려면** 자기 `resources/config_local.ini` 의 `[fastapi] host` 를 `0.0.0.0` 으로 바꾸고 다시 기동한다.
   템플릿 기본값은 로컬 전용 `127.0.0.1` 이다. **인증이 없으므로 사내망에서만 열 것.**
 - `reload` 옵션은 없다. 코드를 고치면 서버를 수동으로 재시작한다.
@@ -124,6 +127,23 @@ SSE 이벤트 계약:
 - [ ] RAG 서버를 내린 뒤 질문 → 에이전트가 오류를 답변으로 설명하고 정상 종료(빨간 오류 아님)
 - [ ] 웹 서버(5020)를 내린 뒤 질문 → 빨간 `요청 실패:` 표시
 
+## 대화 유지 (영구 체크포인터)
+
+대화는 SQLite 파일에 저장된다. 경로는 `resources/config_local.ini` 의 `[checkpoint] db-path` 이며,
+상대 경로는 **프로젝트 루트 기준**으로 해석한다(실행 디렉터리에 따라 DB 가 갈리지 않도록).
+
+```ini
+[checkpoint]
+db-path=data/checkpoints.sqlite
+```
+
+- CLI 는 동기 `SqliteSaver`, 웹은 비동기 `AsyncSqliteSaver` 를 쓴다. 동기 saver 는 async 경로에서
+  `NotImplementedError` 를, 비동기 saver 는 메인 스레드의 동기 호출에서 `InvalidStateError` 를 내므로 섞어 쓸 수 없다.
+- 다시 이어가는 방법: CLI 는 `--thread <대화 ID>`, 브라우저는 `localStorage` 에 저장된 ID 로 자동 복원.
+- **전체 초기화는 DB 파일 삭제**: `rm data/checkpoints.sqlite`. 대화별 삭제 기능은 아직 없다.
+- `data/` 는 `.gitignore` 대상이다. 대화 내용이 들어 있으므로 커밋하지 않는다.
+- `thread_id` 를 아는 사람은 그 대화를 읽을 수 있다(인증 없음 — 로컬/사내망 전제).
+
 ## 테스트
 
 ```bash
@@ -140,6 +160,7 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `test/test_main.py` | `run_turn` 출력 형식, RAG 헬스체크 경고 |
 | `test/test_integration_agent.py` | 실제 RAG + qwen3:14b 로 도구 호출·출처 인용 확인 |
 | `test/test_web.py` | FastAPI 라우트, SSE 이벤트 순서·헤더, 멀티턴, 422 |
+| `test/test_checkpointer.py` | SQLite 영속성(재시작 후 대화 유지), `build_default_graph` 기본값 |
 | `test/test_web_ui.py` | `index.html` 계약(상대 경로, 이벤트 이름, CDN·innerHTML 금지) |
 | `test/test_integration_web.py` | 실제 스트리밍으로 `search`/`token`/`done` 확인 |
 
@@ -156,10 +177,11 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `src/agent.py` | `SYSTEM_PROMPT`, `build_graph(chat_model, tools, checkpointer)`, `build_default_graph(settings)`, `RUNTIME_ERRORS` |
 | `src/agent.py` 의 `rewrite` 노드 | 후속 질문을 앞 대화 없이도 이해되는 독립 질문(`REWRITE_PROMPT`)으로 다시 써 agent 에 힌트로 전달. 첫 턴은 LLM 호출 없이 우회 |
 | `src/web/app.py` | `create_app`, `stream_events`(SSE), `check_rag`/`check_ollama` |
-| `src/web/dto.py` | `ChatRequest`, `HealthResponse` |
+| `src/web/dto.py` | `ChatRequest`, `HealthResponse`, `ThreadMessage`, `ThreadMessagesResponse` |
+| `src/checkpointer.py` | `sqlite_saver`(CLI·동기), `async_sqlite_saver`(웹·비동기) |
 | `resources/static/index.html` | 단일 파일 채팅 UI(외부 CDN 없음) |
 
 ## 범위 밖
 
-사내 API 실호출, 인증/인가·HTTPS, 마크다운 렌더링, 영구 체크포인터(프로세스 종료 시 대화 소실),
+사내 API 실호출, 인증/인가·HTTPS, 대화 목록 조회·대화별 삭제·만료 정리, 사용자별 분리,
 `langgraph dev` 노출은 범위에 없다.

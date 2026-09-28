@@ -20,10 +20,17 @@ class Settings:
     recursion_limit: int
     host: str
     port: int
+    checkpoint_db: Path
 
 
 def config_path_for(profile: str) -> Path:
     return PROJECT_ROOT / "resources" / f"config_{profile}.ini"
+
+
+def _resolve_path(raw: str) -> Path:
+    """상대 경로는 실행 디렉터리와 무관하게 프로젝트 루트 기준으로 해석한다."""
+    path = Path(raw)
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -42,6 +49,7 @@ def load_settings(path: str | Path) -> Settings:
     ollama = parser["ollama"]
     agent = parser["agent"]
     fastapi = parser["fastapi"]
+    checkpoint = parser["checkpoint"]
     return Settings(
         rag_base_url=rag["base-url"],
         rag_search_path=rag["search-path"],
@@ -55,4 +63,5 @@ def load_settings(path: str | Path) -> Settings:
         recursion_limit=int(agent["recursion-limit"]),
         host=fastapi["host"],
         port=int(fastapi["port"]),
+        checkpoint_db=_resolve_path(checkpoint["db-path"]),
     )

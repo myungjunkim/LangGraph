@@ -3,14 +3,14 @@ import json
 from typing import AsyncIterator
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Path as PathParam
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agent import RUNTIME_ERRORS
 from src.config.settings import PROJECT_ROOT, Settings
-from src.web.dto import ChatRequest, HealthResponse
+from src.web.dto import ChatRequest, HealthResponse, ThreadMessage, ThreadMessagesResponse
 
 STATIC_DIR = PROJECT_ROOT / "resources" / "static"
 
@@ -34,6 +34,17 @@ def check_ollama(base_url: str, model: str, timeout: float) -> bool:
         return model in {m.get("name", "") for m in response.json().get("models", [])}
     except (httpx.HTTPError, ValueError):
         return False
+
+
+def to_thread_messages(messages) -> list[ThreadMessage]:
+    """복원용 대화 기록. 질문과 최종 답변만 남기고 도구 호출·청크 원문은 버린다."""
+    result = []
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            result.append(ThreadMessage(role="user", content=message.content))
+        elif isinstance(message, AIMessage) and not message.tool_calls and message.content:
+            result.append(ThreadMessage(role="assistant", content=message.content))
+    return result
 
 
 async def stream_events(graph, config: dict, text: str) -> AsyncIterator[tuple[str, object]]:
@@ -85,5 +96,11 @@ def create_app(graph, settings: Settings) -> FastAPI:
 
         return StreamingResponse(generate(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get("/v1/threads/{thread_id}/messages", response_model=ThreadMessagesResponse, tags=["대화"])
+    async def thread_messages(thread_id: str = PathParam(min_length=1, max_length=64)):
+        # 없는 대화면 상태가 비어 있어 빈 목록이 된다(404 가 아니라 200)
+        state = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+        return ThreadMessagesResponse(messages=to_thread_messages(state.values.get("messages", [])))
 
     return app
