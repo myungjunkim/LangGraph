@@ -19,6 +19,41 @@ StateGraph(AgentState)
 - 답변 생성은 에이전트 LLM 이 한다. RAG 의 `/v1/ask` 는 쓰지 않고 원본 청크만 받아온다.
 - 사내 문서를 외부 API 로 보내지 않는다. LLM 은 로컬 Ollama `qwen3:14b`.
 
+## 빠른 시작
+
+RAG 서버(5010)와 웹 서버(5020)를 한 번에 띄운다. **이미 떠 있는 서비스는 건드리지 않고 건너뛴다.**
+
+```bash
+python run.py                  # 기동(중복 실행 방지)
+python run.py --status         # 상태만 확인
+python run.py --stop           # 이 스크립트가 띄운 것만 종료
+```
+
+```
+Ollama      : ok (qwen3:14b)
+RAG         : 이미 실행 중 http://127.0.0.1:5010 (다른 프로세스가 띄웠을 수 있어 건드리지 않습니다)
+LangGraph   : 기동 중... ok (7초)  http://127.0.0.1:5020   로그 logs/web.log
+
+브라우저: http://127.0.0.1:5020
+종료: python run.py --stop  (이 스크립트가 띄운 것만 내려갑니다)
+```
+
+| 인자 | 기본값 | 설명 |
+|---|---|---|
+| `--active-profile` | `local` | 두 서비스에 같은 값을 넘긴다 |
+| `--rag-dir` | `../RAG` | RAG 저장소 경로 |
+| `--timeout` | `90` | 기동 후 `/check` 200 을 기다리는 최대 초(RAG 인덱스 로드에 시간이 걸린다) |
+
+- 실행 중 판정은 포트 점유가 아니라 **`/check` 200** 이다. 다른 사람·다른 터미널이 띄운 서버는 그대로 둔다.
+- `--stop` 은 **이 스크립트가 만든 PID 파일 + 프로세스 명령줄 확인**을 모두 통과한 프로세스에만 `SIGTERM` 을 보낸다.
+  강제 종료(`SIGKILL`)는 하지 않는다. PID 파일이 없으면 "다른 프로세스가 사용 중" 으로 알리고 아무것도 하지 않는다.
+- **Ollama 는 확인만 한다.** 없으면 `ollama serve`(또는 `brew services start ollama`), 모델이 없으면
+  `ollama pull qwen3:14b` 안내만 출력하고 계속 진행한다. 보통 시스템 데몬으로 떠 있어 중복 기동이 더 위험하다.
+- 로그는 `logs/rag.log`, `logs/web.log`, PID 파일은 `logs/*.pid` 에 쌓인다(`logs/` 는 `.gitignore` 대상).
+- 기동에 실패해도 이미 성공한 서비스는 내리지 않는다(자동 롤백 없음). 로그 경로를 보고 원인을 확인한다.
+
+사전 준비(설정 파일·의존성 설치·Ollama 모델)는 아래 "사전 준비" 를 먼저 한 번 마쳐야 한다.
+
 ## 사전 준비
 
 1. **RAG 서버 기동** (`/Users/mjkim/workspace/RAG`)
@@ -140,9 +175,39 @@ db-path=data/checkpoints.sqlite
 - CLI 는 동기 `SqliteSaver`, 웹은 비동기 `AsyncSqliteSaver` 를 쓴다. 동기 saver 는 async 경로에서
   `NotImplementedError` 를, 비동기 saver 는 메인 스레드의 동기 호출에서 `InvalidStateError` 를 내므로 섞어 쓸 수 없다.
 - 다시 이어가는 방법: CLI 는 `--thread <대화 ID>`, 브라우저는 `localStorage` 에 저장된 ID 로 자동 복원.
-- **전체 초기화는 DB 파일 삭제**: `rm data/checkpoints.sqlite`. 대화별 삭제 기능은 아직 없다.
+- **전체 초기화는 DB 파일 삭제**: `rm data/checkpoints.sqlite`. 오래된 대화만 골라 지우려면 아래 "대화 정리" 참고.
 - `data/` 는 `.gitignore` 대상이다. 대화 내용이 들어 있으므로 커밋하지 않는다.
 - `thread_id` 를 아는 사람은 그 대화를 읽을 수 있다(인증 없음 — 로컬/사내망 전제).
+
+### 대화 정리
+
+쌓인 대화를 수동으로 정리한다. **기본은 목록만 출력하고 아무것도 지우지 않는다.** `--apply` 를 붙였을 때만 삭제한다.
+
+```bash
+python maintenance.py --active-profile=local                        # 14일 이상 미사용 대화 목록만
+python maintenance.py --active-profile=local --apply                # 실제 삭제
+python maintenance.py --active-profile=local --older-than 30 --apply
+python maintenance.py --active-profile=local --apply --vacuum       # 삭제 후 파일 크기 회수
+```
+
+```
+전체 대화 12개 · 정리 대상 3개 (마지막 활동 14일 경과 기준)
+  564621ed-0582-4a09-b2fa-5cc7ff34fe8e  2026-08-11  메시지 8개  메시지 등록 API 알려줘
+  s9-web-1                              2026-09-01  메시지 2개  gpts 등록 API 알려줘
+--apply 를 붙이면 삭제합니다.
+```
+
+| 인자 | 기본값 | 설명 |
+|---|---|---|
+| `--older-than` | `14` | 마지막 활동 이후 경과 일수. 이 값을 **넘긴** 대화만 대상(정확히 N일은 제외) |
+| `--apply` | 없음 | 붙였을 때만 삭제 |
+| `--vacuum` | 없음 | `--apply` 와 함께일 때만 `VACUUM` 실행(단독이면 안내 후 무시) |
+
+- **삭제는 되돌릴 수 없다.** 먼저 `--apply` 없이 목록을 확인하고, 필요하면 DB 파일을 복사해 두고 실행한다.
+- 서버가 떠 있는 상태에서 대화를 지우면, 그 대화를 보고 있던 브라우저는 새로고침 시 **빈 대화**로 시작한다
+  (`thread_id` 는 남아 있지만 기록이 없다). 서버를 내리고 실행할 필요는 없다.
+- 새 설정 키는 없다. 보존 기간은 `--older-than` 인자로만 받는다.
+- 삭제는 체크포인터의 공개 API(`delete_thread`)로만 하고, DB 테이블을 직접 건드리지 않는다.
 
 ## 테스트
 
@@ -161,6 +226,8 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `test/test_integration_agent.py` | 실제 RAG + qwen3:14b 로 도구 호출·출처 인용 확인 |
 | `test/test_web.py` | FastAPI 라우트, SSE 이벤트 순서·헤더, 멀티턴, 422 |
 | `test/test_checkpointer.py` | SQLite 영속성(재시작 후 대화 유지), `build_default_graph` 기본값 |
+| `test/test_maintenance.py` | 대화 열거·만료 선택 경계·삭제·출력 형식(임시 DB) |
+| `test/test_launcher.py` | 중복 실행 방지(spawn 미호출), PID 파일 처리, `--stop` 안전 규칙 |
 | `test/test_web_ui.py` | `index.html` 계약(상대 경로, 이벤트 이름, CDN·innerHTML 금지) |
 | `test/test_integration_web.py` | 실제 스트리밍으로 `search`/`token`/`done` 확인 |
 
@@ -179,9 +246,14 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `src/web/app.py` | `create_app`, `stream_events`(SSE), `check_rag`/`check_ollama` |
 | `src/web/dto.py` | `ChatRequest`, `HealthResponse`, `ThreadMessage`, `ThreadMessagesResponse` |
 | `src/checkpointer.py` | `sqlite_saver`(CLI·동기), `async_sqlite_saver`(웹·비동기) |
+| `maintenance.py` | 대화 정리 진입점(기본 목록만, `--apply` 로 삭제) |
+| `run.py` | 기동 스크립트 진입점(`--status`/`--stop`, 중복 실행 방지) |
+| `src/launcher.py` | `is_healthy`/`read_pid`/`start`/`stop`/`status` — 기동·종료 판정 |
+| `src/maintenance.py` | `collect_threads`, `select_expired`, `purge`, `format_report` |
 | `resources/static/index.html` | 단일 파일 채팅 UI(외부 CDN 없음) |
 
 ## 범위 밖
 
-사내 API 실호출, 인증/인가·HTTPS, 대화 목록 조회·대화별 삭제·만료 정리, 사용자별 분리,
-`langgraph dev` 노출은 범위에 없다.
+사내 API 실호출, 인증/인가·HTTPS, 자동 정리(기동 시·주기 실행), 웹 UI 에서의 대화 목록·삭제,
+대화 내보내기·백업, 사용자별 분리, Ollama 자동 기동·모델 `pull`, 포그라운드 감시 모드·자동 재시작,
+Docker/launchd/systemd, `langgraph dev` 노출은 범위에 없다.
