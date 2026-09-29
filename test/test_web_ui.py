@@ -354,9 +354,15 @@ class T extends B {
 }
 class E extends B {
   constructor(tag) {
-    super(Node.ELEMENT_NODE); this.tagName = tag; this.attrs = {};
+    // 브라우저의 Element.tagName 은 HTML 문서에서 항상 대문자다(DOM 표준)
+    super(Node.ELEMENT_NODE); this.tagName = String(tag).toUpperCase(); this.attrs = {};
     this.classes = new Set();
-    this.classList = { add: (c) => this.classes.add(c), contains: (c) => this.classes.has(c) };
+    // agent-15: 스트리밍 커서 토글용으로 remove 를 추가(기존 add/contains 는 그대로)
+    this.classList = {
+      add: (c) => this.classes.add(c),
+      remove: (c) => this.classes.delete(c),
+      contains: (c) => this.classes.has(c),
+    };
   }
   set textContent(v) { const t = new T(v); t.parentNode = this; this.childNodes = [t]; }
   get textContent() { return this.childNodes.map(c => c.textContent).join(''); }
@@ -379,9 +385,10 @@ export function serialize(node) {
   if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
   const inner = node.childNodes.map(serialize).join('');
   if (node.nodeType === Node.FRAGMENT_NODE) return inner;
-  if (node.tagName === 'br') return '<br>';
+  const tag = node.tagName.toLowerCase();          // 직렬화는 outerHTML 처럼 소문자로
+  if (tag === 'br') return '<br>';
   const attrs = Object.entries(node.attrs).map(([k, v]) => ` ${k}="${v}"`).join('');
-  return `<${node.tagName}${attrs}>${inner}</${node.tagName}>`;
+  return `<${tag}${attrs}>${inner}</${tag}>`;
 }
 """
 
@@ -728,3 +735,832 @@ def test_history_failure_is_silent():
     assert "catch" in body
     assert "return" in body
     assert "요청 실패" not in body
+
+
+# --- agent-15: 채팅 UI 리디자인 (겉모습만, 서버 계약 불변) ---
+
+# U2. 입력창(textarea + Enter 전송)
+
+def test_composer_uses_textarea_with_same_ids():
+    html = _html()
+    assert re.search(r'<textarea[^>]+id="question"', html)
+    assert not re.search(r'<input[^>]+id="question"', html)
+    for element_id in ("form", "send", "reset", "log", "question"):
+        assert f'id="{element_id}"' in html
+
+
+def test_enter_sends_and_shift_enter_makes_a_newline():
+    script = _script()
+    handler = script[script.index("input.addEventListener('keydown'"):]
+    assert "e.key !== 'Enter' || e.shiftKey" in handler      # Shift+Enter 는 그냥 줄바꿈
+    assert "e.isComposing" in handler                        # 한글 조합 중에는 보내지 않는다
+    assert "e.preventDefault()" in handler
+    assert "requestSubmit" in handler                        # 폼 submit 경로를 그대로 탄다
+
+
+def test_empty_input_is_still_ignored():
+    submit = _script()[_script().index("form.addEventListener('submit'"):]
+    assert "input.value.trim()" in submit
+    assert re.search(r"if\s*\(\s*!q\s*\)\s*return", submit)
+
+
+def test_textarea_grows_up_to_a_limit():
+    script = _script()
+    assert "function autoGrow()" in script
+    assert "input.scrollHeight" in script
+    assert re.search(r"#question\s*\{[^}]*max-height", _style())    # 그 이상은 스크롤
+
+
+# U3. 스트리밍 커서
+
+def test_streaming_cursor_is_a_css_pseudo_element():
+    """커서를 DOM 요소로 만들지 않아 답변 textContent 가 오염되지 않는다."""
+    assert re.search(r"\.body\.streaming::after\s*\{[^}]*content", _style())
+    assert "@keyframes blink" in _style()
+
+
+def test_cursor_turns_on_while_streaming_and_off_when_finished():
+    script = _script()
+    token = script[script.index("if (event === 'token')"):script.index("else if (event === 'search')")]
+    assert "classList.add('streaming')" in token
+
+    finish = _function_body("finishAnswer")
+    assert "classList.remove('streaming')" in finish
+    # done·error·중단 세 경로 모두에서 커서가 꺼진다
+    assert re.search(r"else if \(event === 'done'\)[^\n]*finishAnswer", script)
+    assert re.search(r"else if \(event === 'error'\)[^\n]*finishAnswer", script)
+    assert re.search(r"body\.classList\.remove\('streaming'\);\s*\n\s*if \(!ended\)", script)
+
+
+# U4·U5. 코드블록 후처리와 복사
+
+def test_code_block_decoration_is_post_processing_not_renderer():
+    """renderMarkdown 은 그대로 두고 decorateCodeBlocks 가 <pre> 를 감싼다."""
+    renderer = _script()[_script().index("function renderMarkdown("):_script().index("// 서버에 남아 있는 이전 대화")]
+    assert "codeblock" not in renderer and "codebar" not in renderer
+
+    decorate = _function_body("decorateCodeBlocks")
+    assert "createElement('div')" in decorate
+    assert "'codeblock'" in decorate and "'codebar'" in decorate
+    assert "replaceChild" in decorate
+    assert "innerHTML" not in decorate
+
+
+def test_code_block_language_comes_from_the_fence():
+    body = _function_body("fenceLanguages")
+    assert "```" in body
+    assert "gm" in body                     # 여러 줄에서 여는 펜스만 골라낸다
+
+
+def test_copy_button_is_skipped_without_clipboard_api():
+    body = _function_body("copyButton")
+    assert "navigator.clipboard" in body
+    assert re.search(r"return null", body)
+    assert "writeText" in body
+
+
+def test_answer_copy_uses_the_raw_markdown():
+    finish = _function_body("finishAnswer")
+    assert "copyButton(() => raw, '복사')" in finish
+    assert "answer-copy" in finish
+    decorate = _function_body("decorateCodeBlocks")
+    assert "copyButton(() => pre.textContent, '복사')" in decorate   # 코드 복사는 그 블록만
+
+
+# U6. 다크 모드
+
+def test_dark_mode_only_redefines_colour_variables():
+    style = _style()
+    blocks = re.findall(r"@media \(prefers-color-scheme: dark\)\s*\{(.*?)\n  \}", style, re.S)
+    assert blocks, "다크 모드 블록이 없다"
+    joined = "\n".join(blocks)
+    assert "--bg:" in joined and "--text:" in joined
+    assert "display:" not in joined and "position:" not in joined   # 구조 CSS 는 재정의하지 않는다
+
+
+# U7. 스크롤
+
+def test_scroll_sticks_to_bottom_only_when_user_is_at_the_bottom():
+    stick = _function_body("stickToBottom")
+    assert "nearBottom()" in stick
+    assert "showToBottom(true)" in stick
+    assert "scrollIntoView" in stick
+
+    near = _function_body("nearBottom")
+    assert "window.scrollY" in near
+    assert "typeof window === 'undefined'" in near        # DOM 셰임에서도 안전하다
+
+
+def test_scroll_to_bottom_button_exists_and_toggles():
+    assert 'id="tobottom"' in _html()
+    assert re.search(r"#tobottom\.show\s*\{", _style())
+    assert re.search(r"#tobottom\s*\{[^}]*display\s*:\s*none", _style())
+    script = _script()
+    assert "showToBottom(!nearBottom())" in script
+
+
+# D1·D2. 레이아웃·아바타
+
+def test_layout_is_768_and_answers_have_no_card():
+    style = _style()
+    assert re.search(r"main\s*\{[^}]*max-width:\s*768px", style)
+    assert re.search(r"\.msg\s*\{(?:(?!\})[\s\S])*\}", style)
+    msg_rule = re.search(r"\.msg\s*\{([^}]*)\}", style).group(1)
+    assert "border:" not in msg_rule                      # 답변 카드 테두리 제거
+    assert re.search(r"\.msg\.q\s*\{[^}]*background:\s*var\(--bubble\)", style)
+
+
+def test_avatars_are_css_pseudo_elements_without_images():
+    style = _style()
+    assert re.search(r"\.msg::before\s*\{[^}]*content:\s*\"A\"", style)
+    assert re.search(r"\.msg\.q::before\s*\{[^}]*content:\s*\"나\"", style)
+    assert "url(" not in style                            # 이미지·아이콘 폰트 없음
+
+
+def test_tool_call_line_is_a_pill():
+    assert re.search(r"\.search\s*\{[^}]*border-radius:\s*999px", _style())
+
+
+# U4 실행 검증: 렌더 결과에 후처리를 적용한 DOM 을 node 로 직접 확인한다.
+
+_DECORATE_RUNNER = """
+import { readFileSync } from 'node:fs';
+const samples = JSON.parse(readFileSync(process.argv[2], 'utf-8'));
+const { renderMarkdown, decorateCodeBlocks, document, serialize } = await import('./decorate.mjs');
+process.stdout.write(JSON.stringify(samples.map(raw => {
+  const plain = document.createElement('div');
+  plain.replaceChildren(renderMarkdown(raw));
+  const decorated = document.createElement('div');
+  decorated.replaceChildren(renderMarkdown(raw));
+  decorateCodeBlocks(decorated, raw);
+  return { plain: serialize(plain), decorated: serialize(decorated) };
+})));
+"""
+
+_DECORATE_WORKDIR = {}
+
+
+def _decorate(samples):
+    """마크다운 원문 -> [{'plain', 'decorated'}] (node 가 없으면 skip)."""
+    import atexit
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node 없음 — 후처리 실행 검증 생략")
+    work = _DECORATE_WORKDIR.get("path")
+    if work is None:
+        script = _script()
+        source = script[script.index("function linkifyUrls("):script.index("form.addEventListener")]
+        work = Path(tempfile.mkdtemp(prefix="decorate_"))
+        atexit.register(shutil.rmtree, work, True)
+        (work / "shim.mjs").write_text(_DOM_SHIM, encoding="utf-8")
+        (work / "decorate.mjs").write_text(
+            "import { document, Node } from './shim.mjs';\n"
+            "const threadId = 'thread-test';\n"
+            + source
+            + "\nexport { renderMarkdown, decorateCodeBlocks, document };\n"
+              "export { serialize } from './shim.mjs';\n",
+            encoding="utf-8",
+        )
+        (work / "run.mjs").write_text(_DECORATE_RUNNER, encoding="utf-8")
+        _DECORATE_WORKDIR["path"] = work
+    payload = work / "in.json"
+    payload.write_text(json.dumps(samples), encoding="utf-8")
+    proc = subprocess.run([node, str(work / "run.mjs"), str(payload)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_decoration_adds_a_bar_only_after_post_processing():
+    result = _decorate(["```python\nprint(1)\n```"])[0]
+
+    assert result["plain"] == "<div><pre><code>print(1)</code></pre></div>"     # 렌더러 출력 불변
+    assert "codeblock" in result["decorated"]
+    assert "<pre><code>print(1)</code></pre>" in result["decorated"]            # 코드 내용 그대로
+    assert ">python<" in result["decorated"]                                    # 언어 라벨
+    assert "button" not in result["decorated"]                                  # 클립보드 없으면 복사 버튼 없음
+
+
+def test_decoration_labels_each_block_and_defaults_to_code():
+    result = _decorate(["```js\na\n```\n\n텍스트\n\n```\nb\n```"])[0]
+
+    assert result["decorated"].count("codeblock") == 2
+    assert ">js<" in result["decorated"]
+    assert ">code<" in result["decorated"]          # 언어 표기가 없으면 기본 라벨
+
+
+def test_decoration_leaves_non_code_answers_untouched():
+    result = _decorate(["### 제목\n\n- **굵게** 항목"])[0]
+    assert result["plain"] == result["decorated"]
+
+
+# U12. 빈 화면 예시 질문 (D10)
+
+def test_examples_container_lives_outside_the_log():
+    html = _html()
+    assert '<div id="examples"' in html
+    log_block = html[html.index('<div id="log"'):html.index('<form id="form"')]
+    assert log_block.index('id="log"') < log_block.index('id="examples"')
+    assert '<div id="log"></div>' in html          # 로그는 여전히 비어 있는 컨테이너
+
+
+def test_examples_are_a_named_constant_array():
+    script = _script()
+    assert re.search(r"const EXAMPLES = \[", script)
+    items = re.search(r"const EXAMPLES = \[(.*?)\];", script, re.S).group(1)
+    assert len(re.findall(r'"[^"]+"', items)) >= 3
+    assert "자유롭게 고치면 된다" in script          # 사용자가 직접 고칠 수 있다는 안내
+
+
+def test_example_click_reuses_the_existing_submit_path():
+    body = _function_body("buildExamples")
+    assert "input.value = text" in body
+    assert "form.requestSubmit()" in body
+    assert "ask(" not in body                      # 전송 로직을 복제하지 않는다
+    assert "createElement('button')" in body and "'button'" in body
+    assert "innerHTML" not in body
+
+
+def test_examples_show_only_when_the_log_is_empty():
+    body = _function_body("showExamples")
+    assert "log.childNodes.length === 0" in body
+    assert "'show'" in body
+    script = _script()
+    # 첫 전송·새 대화·복원 완료 세 시점에서 다시 판정한다
+    submit = script[script.index("form.addEventListener('submit'"):script.index("resetBtn.addEventListener")]
+    assert "showExamples()" in submit
+    reset = script[script.index("resetBtn.addEventListener"):script.index("function buildExamples(")]
+    assert "showExamples()" in reset
+    assert "restored.finally(showExamples)" in script
+
+
+def test_examples_are_locked_while_answering():
+    script = _script()
+    submit = script[script.index("form.addEventListener('submit'"):script.index("resetBtn.addEventListener")]
+    before, after = submit.split("try {", 1)
+    assert "setExamplesDisabled(true)" in before
+    assert "setExamplesDisabled(false)" in after.split("finally", 1)[1]
+    assert "button.disabled = on" in _function_body("setExamplesDisabled")
+
+
+def test_examples_have_their_own_styles_outside_msg():
+    style = _style()
+    assert re.search(r"#examples\s*\{[^}]*display\s*:\s*none", style)
+    assert re.search(r"#examples\.show\s*\{[^}]*display\s*:\s*grid", style)   # D11: 2×2 카드
+
+
+# U13. 빈 화면 히어로 (D11)
+
+def test_empty_screen_shows_hero_and_examples():
+    html = _html()
+    assert '<div id="hero">' in html
+    assert re.search(r"<h2>[^<]+</h2>", html)                      # 큰 제목 한 줄
+    style = _style()
+    assert re.search(r"body\.empty #hero\s*\{[^}]*display\s*:\s*block", style)
+    assert re.search(r"#hero\s*\{[^}]*display\s*:\s*none", style)  # 대화가 있으면 숨김
+
+
+def test_empty_class_follows_the_same_log_check():
+    body = _function_body("showExamples")
+    assert "log.childNodes.length === 0" in body
+    assert "document.body.classList" in body and "'empty'" in body
+    assert body.count("empty ? 'add' : 'remove'") == 2             # 예시와 레이아웃이 같은 조건
+
+
+def test_layout_switch_is_css_only_and_form_stays_in_place():
+    """form·textarea·버튼을 DOM 에서 옮기지 않는다(클래스 + CSS 배치로만 전환)."""
+    html = _html()
+    main = html[html.index("<main>"):html.index("</main>")]
+    order = [m for m in re.findall(r'id="(hero|log|examples|form|question|send|tobottom)"', main)]
+    assert order == ["hero", "log", "examples", "form", "question", "send", "tobottom"]
+    # form 의 부모는 여전히 main, textarea·send 의 부모는 여전히 composer
+    assert re.search(r'<form id="form">\s*<div class="composer">\s*<textarea id="question"', main)
+    assert re.search(r'<textarea id="question"[\s\S]*?<button id="send"', main)
+
+    script = _script()
+    for moved in ("appendChild(form", "insertBefore(form", "append(form", "form.remove("):
+        assert moved not in script
+
+    style = _style()
+    assert re.search(r"body\.empty main\s*\{[^}]*justify-content\s*:\s*flex-start", style)   # D16
+    assert re.search(r"body\.empty form\s*\{[^}]*position\s*:\s*static", style)
+
+
+def test_examples_are_four_labelled_cards():
+    script = _script()
+    items = re.search(r"const EXAMPLES = \[(.*?)\n\];", script, re.S).group(1)
+    assert len(re.findall(r"\{\s*label:", items)) == 4
+    assert len(re.findall(r"text:\s*\"", items)) == 4
+
+    body = _function_body("buildExamples")
+    assert "const { label, text } of EXAMPLES" in body
+    assert "tag.textContent = label" in body
+    assert "input.value = text" in body                            # 전송되는 값은 text
+    assert "form.requestSubmit()" in body
+
+
+def test_example_grid_is_two_columns_with_narrow_fallback():
+    style = _style()
+    assert re.search(r"#examples\.show\s*\{[^}]*repeat\(2,", style)
+    assert re.search(r"@media \(max-width: \d+px\)\s*\{\s*#examples\.show\s*\{[^}]*1fr", style)
+
+
+# U14. 헤더 상태 (D12)
+
+def test_health_element_keeps_id_and_live_region():
+    assert re.search(r'<span id="health" aria-live="polite"', _html())
+
+
+def test_health_shows_short_label_with_full_text_in_attributes():
+    body = _function_body("setHealth")
+    assert "el.textContent = short" in body
+    assert "el.title = full" in body
+    assert "setAttribute('aria-label', full)" in body
+
+    refresh = _function_body("refreshHealth")
+    assert "RAG ${h.rag ? '연결됨' : '끊김'}" in refresh             # 전체 문구는 그대로 전달
+    assert "Ollama ${h.ollama ? '연결됨' : '끊김'}" in refresh
+    assert "상태 확인 실패" in refresh
+
+
+def test_health_has_three_coloured_states():
+    style = _style()
+    for state in ("ok", "degraded", "down"):
+        assert re.search(rf"#health\.{state}::before\s*\{{[^}}]*background", style)
+    refresh = _function_body("refreshHealth")
+    assert "'ok' : 'degraded'" in refresh
+    assert "setHealth('down'" in refresh
+
+
+# U15. 글자 크기 (D13)
+
+def _px(pattern):
+    """`선택자 { ... font-size: N px ... }` 에서 숫자만 뽑는다."""
+    m = re.search(pattern + r"\s*\{[^}]*font-size\s*:\s*([\d.]+)px", _style())
+    assert m, f"{pattern} 의 font-size 를 찾지 못했다"
+    return float(m.group(1))
+
+
+def test_base_font_size_is_a_single_variable():
+    style = _style()
+    assert re.search(r":root\s*\{[^}]*--fs:\s*17px", style)
+    assert "이 값만 바꾸면 전체가 따라 움직인다" in style     # 사용자가 한 줄로 조정할 수 있다
+
+
+def test_body_and_messages_use_the_base_size():
+    style = _style()
+    assert re.search(r"body\s*\{[^}]*font-size\s*:\s*var\(--fs\)", style)
+    assert re.search(r"body\s*\{[^}]*line-height\s*:\s*1\.7", style)
+    assert re.search(r"\.msg\s*\{[^}]*font-size\s*:\s*var\(--fs\)", style)
+    assert re.search(r"\.msg\s*\{[^}]*line-height\s*:\s*1\.7", style)
+
+
+def test_markdown_headings_form_a_visible_hierarchy():
+    h1, h2, h3, h4 = (_px(rf"\.msg h{n}") for n in (1, 2, 3, 4))
+    assert h1 > h2 > h3 > h4
+    assert (h1, h2, h3, h4) == (22, 19, 17.5, 16)
+    assert h3 > 17            # 본문(17px)보다 큰 단계가 h3 까지
+
+
+def test_code_and_pill_sizes_are_readable():
+    assert _px(r"\.msg pre") == 14
+    assert _px(r"\.msg code") == 14
+    assert _px(r"\.search") == 13
+    assert _px(r"\.codebar") == 13
+
+
+def test_header_and_composer_follow_the_base_size():
+    style = _style()
+    assert re.search(r"header h1\s*\{[^}]*font-size\s*:\s*var\(--fs\)", style)
+    assert re.search(r"#question\s*\{[^}]*font-size\s*:\s*var\(--fs\)", style)   # 입력·출력 같은 크기
+
+
+def test_example_cards_are_larger_than_before():
+    style = _style()
+    assert _px(r"#examples \.tag") == 13
+    assert re.search(r"#examples \.text\s*\{[^}]*font-size\s*:\s*calc\(var\(--fs\)", style)
+
+
+def test_dark_mode_does_not_redefine_any_size():
+    """라이트/다크는 색만 다르다. 크기를 중복 정의하면 --fs 한 줄 조정이 깨진다."""
+    blocks = re.findall(r"@media \(prefers-color-scheme: dark\)\s*\{(.*?)\n  \}", _style(), re.S)
+    joined = "\n".join(blocks)
+    for size_property in ("font-size", "line-height", "--fs", "width:", "padding"):
+        assert size_property not in joined
+
+
+def test_examples_cover_confluence_not_only_openapi():
+    """코퍼스는 Confluence 가 대부분이다(D14). 예시가 OpenAPI 쪽으로만 쏠리지 않게 고정한다."""
+    items = re.findall(r'\{\s*label:\s*"([^"]+)",\s*text:\s*"([^"]+)"\s*\}',
+                       re.search(r"const EXAMPLES = \[(.*?)\n\];", _script(), re.S).group(1))
+    assert len(items) == 4
+    assert len({label for label, _ in items}) == 4                 # 라벨 중복 없음
+
+    non_api = [text for _, text in items if "api" not in text.lower()]
+    assert len(non_api) >= 2, f"Confluence 유형 예시가 부족하다: {items}"
+    assert any("openapi.json" in text for _, text in items)        # 실호출 유형도 남긴다
+
+
+# D16. 빈 화면 여백 (입력창과 붙어 보이지 않게)
+
+def test_empty_screen_group_sits_near_the_top():
+    style = _style()
+    main_rule = re.search(r"body\.empty main\s*\{([^}]*)\}", style).group(1)
+    assert "justify-content:flex-start" in main_rule.replace(" ", "")
+    assert "center" not in main_rule
+    assert re.search(r"padding-top:\s*clamp\(\s*\d+px,\s*\d+vh,\s*\d+px\s*\)", main_rule)
+
+
+def test_examples_keep_distance_from_the_composer():
+    style = _style()
+    rule = re.search(r"body\.empty #examples\s*\{([^}]*)\}", style).group(1)
+    assert re.search(r"margin-bottom:\s*clamp\(\s*\d+px,\s*\d+vh,\s*\d+px\s*\)", rule)
+    # 히어로↔예시 간격은 그대로 둔다(한 묶음으로 읽혀야 한다)
+    assert not re.search(r"body\.empty #hero\s*\{[^}]*margin", style)
+
+
+def test_empty_screen_spacing_shrinks_on_short_windows():
+    """clamp 의 하한·vh 값이 작은 창에서도 화면을 넘기지 않을 정도여야 한다."""
+    style = _style()
+    top = re.search(r"body\.empty main\s*\{[^}]*padding-top:\s*clamp\((\d+)px,\s*(\d+)vh,\s*(\d+)px\)", style)
+    gap = re.search(r"body\.empty #examples\s*\{[^}]*margin-bottom:\s*clamp\((\d+)px,\s*(\d+)vh,\s*(\d+)px\)", style)
+    assert top and gap
+    # 600px 높이 창에서 두 여백의 합
+    at_600 = min(max(int(top.group(1)), 600 * int(top.group(2)) / 100), int(top.group(3))) \
+        + min(max(int(gap.group(1)), 600 * int(gap.group(2)) / 100), int(gap.group(3)))
+    assert at_600 <= 200, f"작은 창에서 여백이 과하다: {at_600}px"
+
+
+def test_form_position_switches_without_moving_in_dom():
+    style = _style()
+    assert re.search(r"body\.empty form\s*\{[^}]*position\s*:\s*static", style)
+    assert re.search(r"\n  form\s*\{[^}]*position\s*:\s*sticky", style)   # 대화 중에는 하단 고정
+    script = _script()
+    for moved in ("appendChild(form", "insertBefore(form", "append(form", "form.remove("):
+        assert moved not in script
+
+
+# D16 보정. 두 상태 모두 입력창이 뷰포트 바닥 모서리에 닿지 않는다
+
+def test_composer_floats_above_the_viewport_bottom_while_chatting():
+    rule = re.search(r"\n  form\s*\{([^}]*)\}", _style()).group(1)
+    assert "position:sticky" in rule.replace(" ", "")
+    bottom = re.search(r"bottom:\s*clamp\((\d+)px,\s*(\d+)vh,\s*(\d+)px\)", rule)
+    assert bottom, "sticky 입력창이 바닥에 붙어 있다"
+    assert int(bottom.group(1)) > 0                       # 최소값도 0 이 아니다
+
+
+def test_last_answer_is_not_hidden_behind_the_composer():
+    main_rule = re.search(r"\n  main\s*\{([^}]*)\}", _style()).group(1)
+    assert re.search(r"padding:[^;]*clamp\(\s*\d+px,\s*\d+vh,\s*\d+px\s*\)", main_rule)
+
+
+def test_empty_screen_composer_is_part_of_the_top_group():
+    style = _style()
+    rule = re.search(r"body\.empty form\s*\{([^}]*)\}", style).group(1)
+    assert "position:static" in rule.replace(" ", "")     # 바닥 고정이 아니다
+    assert "margin-top:0" in rule.replace(" ", "")        # 예시 바로 아래(간격은 #examples 가 담당)
+
+
+# --- agent-15 Validator 추가 검증 ---
+# 위 agent-15 계약 테스트 상당수가 스크립트 문자열 grep 이라, 코드가 있어도 "동작"은 고정되지 않는다.
+# 아래는 index.html 의 원본 코드를 그대로 떼어 최소 DOM 셰임 위에서 node 로 실제 실행한다.
+# (셰임에 없는 addEventListener/append 는 별도 파일에서 프로토타입에 덧댄다 — _DOM_SHIM 은 손대지 않는다)
+
+_SHIM_PATCH = """
+import { document } from './shim.mjs';
+const proto = Object.getPrototypeOf(document.createElement('div'));
+proto.addEventListener = function (type, fn) { (this._h ||= {}); (this._h[type] ||= []).push(fn); };
+proto.dispatch = function (type, ev) { for (const fn of ((this._h || {})[type] || [])) fn(ev); };
+proto.append = function (...nodes) { for (const n of nodes) this.appendChild(n); };
+// 실제 브라우저의 Element.tagName 은 HTML 문서에서 항상 대문자다(DOM 표준).
+// _DOM_SHIM 은 소문자를 넣어 두었는데, tagName 을 비교하는 코드는 그 차이에서 갈리므로
+// 여기서는 브라우저와 같은 대문자로 맞춘다(헤드리스 Chrome 실측: <pre> -> "PRE", <button> -> "BUTTON").
+const create = document.createElement;
+document.createElement = (tag) => {
+  const el = create(tag);
+  Object.defineProperty(el, 'tagName', { value: String(tag).toUpperCase(), configurable: true });
+  return el;
+};
+document.body = document.createElement('body');
+"""
+
+
+def _node_run(prefix, files, runner, payload_obj):
+    """임시 디렉터리에 셰임 + 대상 모듈을 쓰고 node 로 실행한다(node 가 없으면 skip)."""
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node 없음 — 실행 검증 생략")
+    work = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        (work / "shim.mjs").write_text(_DOM_SHIM, encoding="utf-8")
+        (work / "patch.mjs").write_text(_SHIM_PATCH, encoding="utf-8")
+        for name, source in files.items():
+            (work / name).write_text(source, encoding="utf-8")
+        (work / "run.mjs").write_text(runner, encoding="utf-8")
+        payload = work / "in.json"
+        payload.write_text(json.dumps(payload_obj), encoding="utf-8")
+        proc = subprocess.run([node, str(work / "run.mjs"), str(payload)],
+                              capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _ui_source() -> str:
+    """addMessage ~ ask 까지(렌더러·후처리·복원 포함) 원본 그대로."""
+    script = _script()
+    source = script[script.index("function addMessage("):script.index("form.addEventListener")]
+    assert "async function ask(" in source and "function finishAnswer(" in source
+    return source
+
+
+# U2. 입력 동작 — 실제 키 이벤트를 흘려 본다
+
+_KEY_RUNNER = """
+import { readFileSync } from 'node:fs';
+const { handlers, form, input, state } = await import('./keys.mjs');
+const events = JSON.parse(readFileSync(process.argv[2], 'utf-8'));
+const out = [];
+for (const ev of events) {
+  state.submits = 0; state.prevented = 0;
+  handlers.keydown({ ...ev, preventDefault: () => { state.prevented++; } });
+  out.push({ submits: state.submits, prevented: state.prevented });
+}
+// 입력 이벤트로 높이가 다시 계산되는지(D3 자동 확장)
+input.style.height = '1px';
+input.scrollHeight = 123;
+handlers.input({});
+out.push({ height: input.style.height });
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _run_keys(events):
+    script = _script()
+    source = script[script.index("// 내용에 맞춰 높이를 늘리되"):script.index("const toBottom =")]
+    assert "addEventListener('keydown'" in source
+    module = (
+        "export const state = { submits: 0, prevented: 0 };\n"
+        "export const handlers = {};\n"
+        "export const input = { style: {}, scrollHeight: 40, value: '',\n"
+        "  addEventListener: (t, fn) => { handlers[t] = fn; } };\n"
+        "export const form = { requestSubmit: () => { state.submits++; } };\n"
+        + source
+    )
+    return _node_run("ui_keys_", {"keys.mjs": module}, _KEY_RUNNER, events)
+
+
+def test_enter_actually_submits_and_shift_enter_does_not():
+    plain, shift, composing, other = _run_keys([
+        {"key": "Enter", "shiftKey": False, "isComposing": False},
+        {"key": "Enter", "shiftKey": True, "isComposing": False},
+        {"key": "Enter", "shiftKey": False, "isComposing": True},
+        {"key": "a", "shiftKey": False, "isComposing": False},
+    ])[:4]
+
+    assert plain == {"submits": 1, "prevented": 1}       # Enter → 전송(줄바꿈 막음)
+    assert shift == {"submits": 0, "prevented": 0}       # Shift+Enter → 줄바꿈만
+    assert composing == {"submits": 0, "prevented": 0}   # 한글 조합 중에는 전송하지 않는다
+    assert other == {"submits": 0, "prevented": 0}
+
+
+def test_input_event_recomputes_the_textarea_height():
+    assert _run_keys([])[-1] == {"height": "123px"}
+
+
+# U3. 스트리밍 커서가 실제로 켜졌다가 꺼진다
+
+_CURSOR_RUNNER = """
+import { readFileSync } from 'node:fs';
+const enc = new TextEncoder();
+globalThis.fetch = async () => ({ ok: true, status: 200, body: { getReader: () => globalThis.__reader } });
+const { ask, log } = await import('./ui.mjs');
+
+function lastBody() {
+  const wrap = log.childNodes[log.childNodes.length - 1];
+  return wrap.childNodes.find(c => c.className === 'body');
+}
+const scenarios = JSON.parse(readFileSync(process.argv[2], 'utf-8'));
+const out = [];
+for (const { head, tail } of scenarios) {
+  const frames = (evs) => evs.map(([e, d]) => `event: ${e}\\ndata: ${JSON.stringify(d)}\\n\\n`).join('');
+  const chunks = [enc.encode(frames(head)), enc.encode(frames(tail))];
+  let i = 0, mid = null;
+  globalThis.__reader = { read: async () => {
+    if (i === 1) mid = lastBody().classes.has('streaming');   // 마지막 프레임 직전 상태
+    if (i >= chunks.length) return { value: undefined, done: true };
+    return { value: chunks[i++], done: false };
+  } };
+  await ask('질문');
+  out.push({ mid, final: lastBody().classes.has('streaming') });
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _run_cursor(scenarios):
+    module = ("import './patch.mjs';\n"
+              "import { document, Node } from './shim.mjs';\n"
+              "const threadId = 'thread-test';\n"
+              "const log = document.createElement('div');\n"
+              + _ui_source()
+              + "\nexport { ask, log };\n")
+    return _node_run("ui_cursor_", {"ui.mjs": module}, _CURSOR_RUNNER, scenarios)
+
+
+def test_streaming_cursor_is_on_during_tokens_and_off_at_the_end():
+    """token 중에는 커서 클래스가 붙고, done·error·중단 세 경로 모두에서 떨어진다."""
+    done, error, cut = _run_cursor([
+        {"head": [["token", "부분 "]], "tail": [["token", "답변"], ["done", ""]]},
+        {"head": [["token", "부분 "]], "tail": [["error", "boom"]]},
+        {"head": [["token", "부분 "]], "tail": [["token", "답변"]]},
+    ])
+
+    for name, result in (("done", done), ("error", error), ("중단", cut)):
+        assert result["mid"] is True, f"{name}: 스트리밍 중 커서가 없다"
+        assert result["final"] is False, f"{name}: 종료 후 커서가 남았다"
+
+
+# U5. 복사 버튼이 실제로 무엇을 복사하는가
+
+_COPY_RUNNER = """
+import { readFileSync } from 'node:fs';
+const copied = [];
+Object.defineProperty(globalThis, 'navigator', {
+  value: { clipboard: { writeText: (t) => copied.push(t) } }, configurable: true,
+});
+globalThis.setTimeout = () => 0;              // 라벨 되돌리기 타이머는 검증 대상이 아니다
+const { addAnswer, finishAnswer, renderMarkdown, log, Node } = await import('./ui.mjs');
+const raw = JSON.parse(readFileSync(process.argv[2], 'utf-8'));
+
+const { wrap, body } = addAnswer();
+body.replaceChildren(renderMarkdown(raw));
+finishAnswer(wrap, body, raw);
+
+const kids = wrap.childNodes.filter(c => c.nodeType === Node.ELEMENT_NODE);
+const answerCopy = kids.find(c => c.className === 'copy answer-copy');
+const blocks = body.childNodes.filter(c => c.className === 'codeblock');
+const labels = blocks.map(b => b.childNodes[0].childNodes[0].textContent);
+const codeCopies = blocks.map(b => b.childNodes[0].childNodes.find(c => c.className === 'copy'))
+                         .filter(Boolean);
+
+const answerLabel = answerCopy ? answerCopy.textContent : null;   // 클릭 전 라벨
+if (answerCopy) answerCopy.dispatch('click', {});
+const afterAnswer = copied.slice();
+for (const c of codeCopies) c.dispatch('click', {});
+process.stdout.write(JSON.stringify({
+  hasAnswerCopy: Boolean(answerCopy),
+  answerLabel,
+  answerLabelAfterClick: answerCopy ? answerCopy.textContent : null,
+  afterAnswer,
+  codeCopied: copied.slice(afterAnswer.length),
+  labels,
+  blockCount: blocks.length,
+  bodyTags: body.childNodes.map(c => c.tagName),
+}));
+"""
+
+
+def _run_copy(raw):
+    module = ("import './patch.mjs';\n"
+              "import { document, Node } from './shim.mjs';\n"
+              "const threadId = 'thread-test';\n"
+              "const log = document.createElement('div');\n"
+              + _ui_source()
+              + "\nexport { addAnswer, finishAnswer, renderMarkdown, log };\n"
+                "export { Node } from './shim.mjs';\n")
+    return _node_run("ui_copy_", {"ui.mjs": module}, _COPY_RUNNER, raw)
+
+
+_COPY_SAMPLE = "설명\n\n```python\nprint(1)\n```\n\n```\nplain\n```\n"
+
+
+def test_answer_copy_button_copies_the_raw_markdown():
+    """D6: 답변 하단 복사 버튼은 렌더 결과가 아니라 마크다운 원문을 복사한다."""
+    result = _run_copy(_COPY_SAMPLE)
+
+    assert result["hasAnswerCopy"] is True
+    assert result["answerLabel"] == "복사"                 # 아이콘 없이 텍스트(D6)
+    assert result["afterAnswer"] == [_COPY_SAMPLE]
+    assert result["answerLabelAfterClick"] == "복사됨"     # 눌렀다는 피드백
+
+
+def test_code_blocks_are_decorated_on_a_browser_faithful_dom():
+    """D5·U4: 실제 브라우저에서도 <pre> 가 상단 바로 감싸지고 코드 복사는 그 블록만 복사한다.
+
+    브라우저의 Element.tagName 은 대문자('PRE')다. 소문자로 비교하면 코드가 있어도
+    화면에는 상단 바·언어 라벨·복사 버튼이 하나도 생기지 않는다.
+    """
+    result = _run_copy(_COPY_SAMPLE)
+
+    assert result["blockCount"] == 2, (
+        f"코드 블록이 장식되지 않았다(본문 자식 태그: {result['bodyTags']})"
+    )
+    assert result["labels"] == ["python", "code"]          # 언어 라벨 / 표기 없으면 기본값
+    assert result["codeCopied"] == ["print(1)", "plain"]   # 코드 복사는 그 블록 텍스트만
+
+
+def test_copy_button_label_is_created_without_html_strings():
+    """복사 버튼도 textContent 로만 만든다(U8 표면 유지)."""
+    body = _function_body("copyButton")
+    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert forbidden not in body
+    assert "createElement('button')" in body
+    assert "button.textContent = label" in body
+
+
+# U12·U13. 예시·빈 화면 전환을 실제로 실행한다
+
+_EXAMPLES_RUNNER = """
+import { readFileSync } from 'node:fs';
+const mod = await import('./examples.mjs');
+const { document, log, examples, input, state, showExamples, setExamplesDisabled, EXAMPLES } = mod;
+
+const snap = () => ({
+  show: examples.classes.has('show'),
+  empty: document.body.classes.has('empty'),
+});
+const out = { built: [], states: [] };
+for (const b of examples.childNodes) {
+  out.built.push({ tag: b.childNodes[0].textContent, text: b.childNodes[1].textContent, type: b.type });
+}
+out.states.push(snap());                                   // 로드 직후: 로그가 비어 있다
+
+const el = document.createElement('div');                  // 첫 질문이 들어오면
+log.appendChild(el);
+showExamples();
+out.states.push(snap());
+
+log.childNodes = [];                                       // 새 대화(로그 비움)
+showExamples();
+out.states.push(snap());
+
+examples.childNodes[1].dispatch('click', {});              // 예시 클릭
+out.clicked = { value: input.value, submits: state.submits, grows: state.grows };
+
+setExamplesDisabled(true);
+out.disabledOn = examples.childNodes.map(b => b.disabled);
+setExamplesDisabled(false);
+out.disabledOff = examples.childNodes.map(b => b.disabled);
+out.examples = EXAMPLES;
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _run_examples():
+    script = _script()
+    constants = script[script.index("const EXAMPLES = ["):script.index("];", script.index("const EXAMPLES = [")) + 2]
+    source = script[script.index("function buildExamples("):script.index("// 내용에 맞춰 높이를 늘리되")]
+    assert "function showExamples()" in source and "function setExamplesDisabled(" in source
+    module = ("import './patch.mjs';\n"
+              "import { document, Node } from './shim.mjs';\n"
+              "export const state = { submits: 0, grows: 0 };\n"
+              "const log = document.createElement('div');\n"
+              "const examples = document.createElement('div');\n"
+              "const input = { value: '', style: {}, scrollHeight: 30 };\n"
+              "const form = { requestSubmit: () => { state.submits++; } };\n"
+              "const restored = Promise.resolve();\n"
+              "function autoGrow() { state.grows++; }\n"
+              + constants + "\n"
+              + source
+              + "\nexport { document, log, examples, input, showExamples, setExamplesDisabled, EXAMPLES };\n")
+    return _node_run("ui_examples_", {"examples.mjs": module}, _EXAMPLES_RUNNER, {})
+
+
+def test_examples_toggle_and_click_actually_work():
+    result = _run_examples()
+
+    assert len(result["built"]) == 4
+    assert [b["type"] for b in result["built"]] == ["button"] * 4      # submit 이 아니다
+    assert [b["tag"] for b in result["built"]] == [e["label"] for e in result["examples"]]
+    assert [b["text"] for b in result["built"]] == [e["text"] for e in result["examples"]]
+
+    empty_at_load, after_message, after_reset = result["states"]
+    assert empty_at_load == {"show": True, "empty": True}
+    assert after_message == {"show": False, "empty": False}            # 첫 전송 시 숨김
+    assert after_reset == {"show": True, "empty": True}                # 새 대화 후 다시 표시
+
+    assert result["clicked"]["value"] == result["examples"][1]["text"]  # 전송되는 값은 text
+    assert result["clicked"]["submits"] == 1                           # 기존 submit 경로 1회
+    assert result["clicked"]["grows"] == 1                             # 높이 재계산도 탄다
+
+    assert result["disabledOn"] == [True] * 4                          # 전송 중 잠금
+    assert result["disabledOff"] == [False] * 4

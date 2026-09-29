@@ -5,35 +5,126 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KUDOS RAG Agent</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --text:#1f2328; --muted:#656d76; --accent:#0969da; }
+  /* 색은 변수로만 두고, 다크 모드에서는 이 변수들만 바꾼다(구조 CSS 는 한 벌) */
+  :root {
+    --bg:#ffffff; --panel:#f7f7f8; --line:#e5e5e7; --text:#1f2328; --muted:#6b7280;
+    --accent:#0b5fff; --bubble:#eef2ff; --code-bg:#f3f4f6;
+    --fs: 17px;   /* 본문 기준 글자 크기. 이 값만 바꾸면 전체가 따라 움직인다 */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#1f2023; --panel:#2a2b2f; --line:#3a3b40; --text:#ececf1; --muted:#9aa0a6;
+      --accent:#7cb2ff; --bubble:#2f3b52; --code-bg:#17181b;
+    }
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; background:var(--bg); color:var(--text); }
-  header { padding:14px 20px; background:var(--card); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
-  header h1 { font-size:16px; margin:0; }
-  #health { font-size:12px; color:var(--muted); margin-left:auto; }
-  #reset { font-size:12px; padding:6px 10px; }
-  main { max-width: 900px; margin: 0 auto; padding: 16px; }
-  #log { display:flex; flex-direction:column; gap:12px; min-height: 50vh; }
-  .msg { padding:12px 14px; border-radius:10px; background:var(--card); border:1px solid var(--line); white-space:pre-wrap; line-height:1.55; }
-  .msg.q { background:#e7f0ff; border-color:#c9dcf7; align-self:flex-end; max-width:80%; }
-  .search { font-size:12px; color:var(--muted); }
+  body { margin:0; font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+         background:var(--bg); color:var(--text); font-size:var(--fs); line-height:1.7; }
+  header { position:sticky; top:0; z-index:2; padding:10px 20px; background:var(--bg);
+           border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
+  header h1 { font-size:var(--fs); margin:0; font-weight:600; }
+  #health { font-size:calc(var(--fs) * 0.76); color:var(--muted); margin-left:auto; display:inline-flex;
+            align-items:center; gap:6px; cursor:default; }
+  #health::before { content:""; width:8px; height:8px; border-radius:50%; background:#8b949e; }
+  #health.ok::before { background:#1a7f37; }
+  #health.degraded::before { background:#bf8700; }
+  #health.down::before { background:#8b949e; }
+  #reset { font-size:calc(var(--fs) * 0.76); padding:6px 12px; border-radius:999px; border:1px solid var(--line);
+           background:var(--panel); color:var(--text); cursor:pointer; }
+  main { max-width: 768px; margin: 0 auto; padding: 0 16px clamp(28px, 5vh, 56px); }
+  #log { display:flex; flex-direction:column; gap:22px; padding:20px 0 8px; min-height: 50vh; }
+
+  /* 답변은 카드 없이 본문처럼, 질문만 연한 말풍선. 아바타는 ::before 로 그려 DOM 을 늘리지 않는다 */
+  .msg { position:relative; margin-left:40px; white-space:pre-wrap; font-size:var(--fs); line-height:1.7; }
+  .msg::before { content:"A"; position:absolute; left:-40px; top:0; width:30px; height:30px;
+                 border-radius:50%; background:var(--accent); color:#fff; font-size:13px;
+                 display:flex; align-items:center; justify-content:center; }
+  .msg.q { margin-left:auto; margin-right:40px; max-width:75%; background:var(--bubble);
+           border-radius:16px; padding:10px 14px; }
+  .msg.q::before { content:"나"; left:auto; right:-40px; background:var(--panel);
+                   color:var(--muted); border:1px solid var(--line); }
+
+  /* 도구 호출 줄: 회색 pill */
+  .search { display:inline-block; max-width:100%; margin:0 0 8px; padding:3px 12px; font-size:13px;
+            color:var(--muted); background:var(--panel); border:1px solid var(--line);
+            border-radius:999px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .body a { color:var(--accent); }
-  .msg h1 { font-size:18px; }
-  .msg h2 { font-size:16px; }
-  .msg h3 { font-size:15px; }
-  .msg h4 { font-size:14px; }
-  .msg h1, .msg h2, .msg h3, .msg h4 { font-weight:600; margin:8px 0 4px; }
-  .msg p { margin:4px 0; }
-  .msg ul, .msg ol { margin:4px 0 4px 20px; padding:0; }
-  .msg pre { background:#f0f2f5; padding:8px 10px; border-radius:6px; overflow-x:auto; font-size:12px; }
-  .msg code { font-family: ui-monospace, Menlo, monospace; font-size:12px; background:#f0f2f5; padding:1px 4px; border-radius:4px; }
+
+  /* 생성 중 커서(D4). 요소를 만들지 않고 클래스만 토글한다 */
+  .body.streaming::after { content:"\25AE"; margin-left:2px; color:var(--muted);
+                           animation: blink 1.05s steps(1, end) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .msg h1 { font-size:22px; }
+  .msg h2 { font-size:19px; }
+  .msg h3 { font-size:17.5px; }
+  .msg h4 { font-size:16px; }
+  .msg h1, .msg h2, .msg h3, .msg h4 { font-weight:600; margin:10px 0 4px; }
+  .msg p { margin:6px 0; }
+  .msg ul, .msg ol { margin:6px 0 6px 20px; padding:0; }
+  .msg pre { background:var(--code-bg); padding:12px 14px; border-radius:8px; overflow-x:auto;
+             font-size:14px; line-height:1.55; margin:10px 0; }
+  .msg code { font-family: ui-monospace, Menlo, monospace; font-size:14px; background:var(--code-bg);
+              padding:1px 5px; border-radius:4px; }
   .msg pre code { background:none; padding:0; }
-  form { position:sticky; bottom:0; margin-top:16px; padding:12px 0; background:var(--bg); display:flex; gap:8px; }
-  input, button { font: inherit; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); }
-  input { flex:1; }
-  button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
-  button:disabled { opacity:.6; cursor:default; }
+
+  /* 코드 블록 상단 바(D5) — 렌더러가 만든 <pre> 를 후처리로 감싼 결과 */
+  .codeblock { border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:8px 0; }
+  .codebar { display:flex; align-items:center; justify-content:space-between; gap:8px;
+             padding:5px 12px; background:var(--panel); font-size:13px; color:var(--muted); }
+  .codeblock pre { margin:0; border-radius:0; }
+  .copy { font:inherit; font-size:13px; padding:3px 10px; border-radius:6px; border:1px solid var(--line);
+          background:transparent; color:var(--muted); cursor:pointer; }
+  .copy:hover { color:var(--text); }
+  .answer-copy { margin-top:8px; }
+
+  /* 입력창(D3): 둥근 컨테이너 + 자동 확장 textarea + 원형 전송 버튼 */
+  /* 입력창은 뷰포트 바닥에 붙이지 않고 조금 띄운다(D16 보정) */
+  form { position:sticky; bottom: clamp(12px, 2vh, 24px); margin-top:8px; padding:10px 0 0;
+         background:var(--bg); }
+  .composer { display:flex; align-items:flex-end; gap:8px; padding:8px 8px 8px 16px;
+              border:1px solid var(--line); border-radius:24px; background:var(--panel); }
+  .composer:focus-within { border-color:var(--accent); }
+  #question { flex:1; border:0; outline:none; resize:none; background:none; color:inherit;
+              font:inherit; font-size:var(--fs); line-height:1.6; max-height:220px; padding:7px 0; }
+  #send { width:38px; height:38px; border-radius:50%; border:0; background:var(--accent); color:#fff;
+          font-size:18px; line-height:1; cursor:pointer; flex:none; }
+  button:disabled { opacity:.5; cursor:default; }
+  .hint { margin:6px 4px 0; font-size:calc(var(--fs) * 0.72); color:var(--muted); text-align:right; }
+
+  /* 빈 화면 히어로 + 예시(D10·D11). 대화가 시작되면 body.empty 가 떨어지고 기존 배치로 돌아간다 */
+  #hero { display:none; text-align:center; padding:8px 0 4px; }
+  body.empty #hero { display:block; }
+  #hero h2 { margin:0 0 8px; font-size:calc(var(--fs) * 1.7); font-weight:600; letter-spacing:-.2px; }
+  #hero p { margin:0; font-size:calc(var(--fs) * 0.9); color:var(--muted); }
+  #examples { display:none; gap:10px; padding:20px 0 4px; }
+  #examples.show { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #examples button { font:inherit; display:flex; flex-direction:column; gap:4px; text-align:left;
+                     padding:12px 14px; border:1px solid var(--line); border-radius:14px;
+                     background:var(--panel); color:var(--text); cursor:pointer; }
+  #examples button:hover { border-color:var(--accent); }
+  #examples .tag { font-size:13px; color:var(--muted); }
+  #examples .text { font-size:calc(var(--fs) * 0.94); line-height:1.45; }
+  @media (max-width: 560px) { #examples.show { grid-template-columns: 1fr; } }
+
+  /* 빈 화면에서는 로그를 접고 히어로·예시·입력창만 남긴다(요소는 DOM 에서 이동하지 않는다).
+     묶음은 세로 중앙이 아니라 위쪽에 두고(D16), 예시와 입력창 사이를 넉넉히 벌린다.
+     여백은 clamp() 로 화면 높이에 반응하게 두어 작은 창에서도 답답하거나 잘리지 않는다 */
+  body.empty main { min-height: calc(100vh - 52px); display:flex; flex-direction:column;
+                    justify-content:flex-start; padding-top: clamp(56px, 15vh, 180px); }
+  body.empty #log { display:none; }
+  body.empty #examples { margin-bottom: clamp(28px, 7vh, 72px); }
+  body.empty form { position:static; margin-top:0; padding:0; }
+  body.empty #tobottom { display:none; }
+
+  /* 맨 아래로(D9) — 사용자가 위로 스크롤했을 때만 보인다 */
+  #tobottom { display:none; position:fixed; right:24px; bottom:104px; padding:7px 14px;
+              border-radius:999px; border:1px solid var(--line); background:var(--panel);
+              color:var(--text); font-size:calc(var(--fs) * 0.8); cursor:pointer; }
+  #tobottom.show { display:block; }
+
   .err { color:#cf222e; }
+  @media (prefers-color-scheme: dark) { .err { color:#ff7b72; } }
 </style>
 </head>
 <body>
@@ -43,11 +134,21 @@
   <span id="health" aria-live="polite">상태 확인 중…</span>
 </header>
 <main>
+  <div id="hero">
+    <h2>무엇을 도와드릴까요?</h2>
+    <p>팀 문서와 사내 API 명세를 찾아 답하고, 요청하면 QA API 를 실제로 호출합니다.</p>
+  </div>
   <div id="log"></div>
+  <div id="examples" aria-label="예시 질문"></div>
   <form id="form">
-    <input id="question" placeholder="예: 메시지 등록 API 호출 방법 알려줘" autocomplete="off" aria-label="질문" required>
-    <button id="send" type="submit">질문</button>
+    <div class="composer">
+      <textarea id="question" rows="1" placeholder="무엇이든 물어보세요 (Shift+Enter 줄바꿈)"
+                autocomplete="off" aria-label="질문" required></textarea>
+      <button id="send" type="submit" aria-label="전송" title="전송">&#8593;</button>
+    </div>
+    <div class="hint">Enter 전송 · Shift+Enter 줄바꿈</div>
   </form>
+  <button id="tobottom" type="button">맨 아래로</button>
 </main>
 <script>
 const log = document.getElementById('log');
@@ -55,20 +156,38 @@ const form = document.getElementById('form');
 const input = document.getElementById('question');
 const sendBtn = document.getElementById('send');
 const resetBtn = document.getElementById('reset');
+const examples = document.getElementById('examples');
+
+// 빈 화면에 보여줄 예시 질문. 자유롭게 고치면 된다(첫 질문으로 말이 되는 문장만).
+const EXAMPLES = [
+  { label: "배포",   text: "챗봇 서비스 배포 브랜치는 환경별로 무엇인가요?" },
+  { label: "운영",   text: "userstore 설정 변경 시 롤링 재배포가 필요한 근거와 확인 절차는 무엇인가요?" },
+  { label: "API",    text: "메시지 등록 API 호출 방법 알려줘" },
+  { label: "실호출", text: "message-api 의 /openapi.json 을 실제로 호출해줘" },
+];
 
 // 대화 식별자는 브라우저가 만든다. 서버는 thread_id 로만 대화를 구분한다.
 // localStorage 에 남겨 두면 새로고침·서버 재기동 뒤에도 같은 대화를 이어받는다
 let threadId = localStorage.getItem('kudos.threadId') || crypto.randomUUID();
 localStorage.setItem('kudos.threadId', threadId);
 
+// 헤더에는 색 점 + 짧은 라벨만. 전체 문구는 title·aria-label 로 확인한다
+function setHealth(state, short, full) {
+  const el = document.getElementById('health');
+  el.className = state;
+  el.textContent = short;
+  el.title = full;
+  el.setAttribute('aria-label', full);
+}
+
 async function refreshHealth() {
   try {
     const r = await fetch('/check');
     const h = await r.json();
-    document.getElementById('health').textContent =
-      `상태: ${h.status} · RAG ${h.rag ? '연결됨' : '끊김'} · Ollama ${h.ollama ? '연결됨' : '끊김'}`;
+    setHealth(h.status === 'ok' ? 'ok' : 'degraded', h.status,
+      `상태: ${h.status} · RAG ${h.rag ? '연결됨' : '끊김'} · Ollama ${h.ollama ? '연결됨' : '끊김'}`);
   } catch (e) {
-    document.getElementById('health').textContent = '상태 확인 실패';
+    setHealth('down', '연결 안 됨', '상태 확인 실패');
   }
 }
 refreshHealth();
@@ -78,7 +197,7 @@ function addMessage(cls, text) {
   el.className = 'msg ' + cls;
   el.textContent = text;
   log.appendChild(el);
-  el.scrollIntoView({ block: 'end' });
+  stickToBottom(el);
   return el;
 }
 
@@ -97,7 +216,7 @@ function addSearchLine(wrap, data) {
   const label = data.tool === 'call_api' ? '[호출]' : '[검색]';
   line.textContent = `${label} ${data.tool}(${data.query})`;
   wrap.insertBefore(line, wrap.lastChild);
-  wrap.scrollIntoView({ block: 'end' });
+  stickToBottom(wrap);
 }
 
 // 답변이 끝난 뒤 본문의 url 을 링크로 바꾼다. HTML 문자열 삽입 없이 텍스트 노드를 쪼개 DOM 으로만 만든다
@@ -252,12 +371,89 @@ async function restoreHistory() {
   for (const m of history || []) {
     if (m.role === 'user') addMessage('q', m.content);
     else {
-      const { body } = addAnswer();
+      const { wrap, body } = addAnswer();
       body.replaceChildren(renderMarkdown(m.content));
+      finishAnswer(wrap, body, m.content);
     }
   }
 }
-restoreHistory();
+const restored = restoreHistory();
+
+// 사용자가 위로 스크롤한 상태면 따라가지 않고 "맨 아래로" 버튼만 띄운다
+function nearBottom() {
+  if (typeof window === 'undefined' || typeof window.scrollY !== 'number') return true;
+  return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
+}
+
+function showToBottom(on) {
+  const button = typeof document.getElementById === 'function' ? document.getElementById('tobottom') : null;
+  if (button) button.classList[on ? 'add' : 'remove']('show');
+}
+
+function stickToBottom(el) {
+  if (!nearBottom()) { showToBottom(true); return; }
+  showToBottom(false);
+  el.scrollIntoView({ block: 'end' });
+}
+
+// --- 완성된 답변에만 붙이는 후처리 (renderMarkdown 의 출력 규칙은 그대로 둔다) ---
+
+// ```python 처럼 여는 펜스의 언어 표기를 순서대로 모은다(렌더러는 언어를 버린다)
+function fenceLanguages(raw) {
+  const languages = [];
+  const re = /^\s*```([A-Za-z0-9_+#.-]*)/gm;
+  let m, open = false;
+  while ((m = re.exec(raw || '')) !== null) {
+    if (!open) languages.push(m[1] || '');
+    open = !open;
+  }
+  return languages;
+}
+
+// 클립보드를 쓸 수 없는 환경(비보안 컨텍스트 등)에서는 버튼을 아예 만들지 않는다
+function copyButton(getText, label) {
+  if (typeof navigator === 'undefined' || !navigator.clipboard) return null;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'copy';
+  button.textContent = label;
+  button.addEventListener('click', () => {
+    navigator.clipboard.writeText(getText());
+    button.textContent = '복사됨';
+    setTimeout(() => { button.textContent = label; }, 1200);
+  });
+  return button;
+}
+
+// 렌더된 <pre> 를 상단 바(언어 라벨 + 복사)로 감싼다. 렌더러를 고치지 않는 후처리 방식
+function decorateCodeBlocks(container, raw) {
+  const languages = fenceLanguages(raw);
+  let index = 0;
+  for (const pre of Array.from(container.childNodes)) {
+    // HTML 문서의 Element.tagName 은 항상 대문자다(DOM 표준). 소문자로 비교하면 하나도 안 걸린다
+    if (pre.tagName !== 'PRE') continue;
+    const block = document.createElement('div');
+    block.className = 'codeblock';
+    const bar = document.createElement('div');
+    bar.className = 'codebar';
+    const label = document.createElement('span');
+    label.textContent = languages[index++] || 'code';
+    bar.appendChild(label);
+    const copy = copyButton(() => pre.textContent, '복사');
+    if (copy) bar.appendChild(copy);
+    container.replaceChild(block, pre);
+    block.appendChild(bar);
+    block.appendChild(pre);
+  }
+}
+
+// 답변이 끝났을 때: 커서 제거 → 코드블록 장식 → 답변 복사 버튼(원문 마크다운을 복사한다)
+function finishAnswer(wrap, body, raw) {
+  body.classList.remove('streaming');
+  decorateCodeBlocks(body, raw);
+  const copy = copyButton(() => raw, '복사');
+  if (copy) { copy.className = 'copy answer-copy'; wrap.appendChild(copy); }
+}
 
 // POST 기반 SSE: EventSource 는 GET 만 지원하므로 fetch 스트림을 직접 파싱한다
 async function ask(message) {
@@ -293,7 +489,8 @@ async function ask(message) {
       if (event === 'token') {
         raw += data;
         body.replaceChildren(renderMarkdown(raw));
-        wrap.scrollIntoView({ block: 'end' });
+        body.classList.add('streaming');
+        stickToBottom(wrap);
       }
       else if (event === 'search') {
         // search 앞의 token 은 도구 호출 직전 멘트다. 최종 답변에 섞이지 않도록 비운다
@@ -301,10 +498,11 @@ async function ask(message) {
         body.replaceChildren();
         addSearchLine(wrap, data);
       }
-      else if (event === 'error') { ended = true; body.classList.add('err'); body.appendChild(document.createTextNode(data)); }
-      else if (event === 'done') ended = true;
+      else if (event === 'error') { ended = true; finishAnswer(wrap, body, raw); body.classList.add('err'); body.appendChild(document.createTextNode(data)); }
+      else if (event === 'done') { ended = true; finishAnswer(wrap, body, raw); }
     }
   }
+  body.classList.remove('streaming');
   if (!ended) { body.classList.add('err'); body.appendChild(document.createTextNode('\n응답이 중단되었습니다.')); }
 }
 
@@ -314,20 +512,83 @@ form.addEventListener('submit', async (e) => {
   if (!q) return;
   addMessage('q', q);
   input.value = '';
+  autoGrow();
+  showExamples();
   sendBtn.disabled = true;
   input.disabled = true;
   resetBtn.disabled = true;  // 답변 도중 새 대화로 화면을 비우면 입력이 잠긴 빈 화면이 남는다
+  setExamplesDisabled(true);
   try { await ask(q); }
   catch (err) { addMessage('a err', '요청 실패: ' + err.message); }
-  finally { sendBtn.disabled = false; input.disabled = false; resetBtn.disabled = false; input.focus(); }
+  finally { sendBtn.disabled = false; input.disabled = false; resetBtn.disabled = false; setExamplesDisabled(false); input.focus(); }
 });
 
 resetBtn.addEventListener('click', () => {
   threadId = crypto.randomUUID();
   localStorage.setItem('kudos.threadId', threadId);
   log.textContent = '';
+  autoGrow();
+  showExamples();
   input.focus();
 });
+
+// 대화가 비어 있을 때만 예시 질문을 보여준다. 클릭하면 입력창에 넣고 기존 submit 경로로 보낸다
+function buildExamples() {
+  for (const { label, text } of EXAMPLES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'example';
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = label;
+    const body = document.createElement('span');
+    body.className = 'text';
+    body.textContent = text;
+    button.append(tag, body);
+    button.addEventListener('click', () => {
+      input.value = text;            // 전송되는 값은 text(라벨은 화면 표시용)
+      autoGrow();
+      form.requestSubmit();          // 전송 로직을 복제하지 않는다
+    });
+    examples.appendChild(button);
+  }
+}
+buildExamples();
+
+function showExamples() {
+  const empty = log.childNodes.length === 0;
+  examples.classList[empty ? 'add' : 'remove']('show');
+  // 배치는 CSS 로만 바꾼다. form·textarea·버튼은 DOM 에서 옮기지 않는다
+  document.body.classList[empty ? 'add' : 'remove']('empty');
+}
+showExamples();
+restored.finally(showExamples);      // 이전 대화가 복원됐으면 숨긴다
+
+function setExamplesDisabled(on) {
+  for (const button of examples.childNodes) if (button.tagName === 'BUTTON') button.disabled = on;
+}
+
+// 내용에 맞춰 높이를 늘리되 CSS 의 max-height 까지만(그 뒤로는 스크롤)
+function autoGrow() {
+  input.style.height = 'auto';
+  input.style.height = input.scrollHeight + 'px';
+}
+input.addEventListener('input', autoGrow);
+
+// Enter 전송, Shift+Enter 줄바꿈. 한글 조합 중(isComposing)에는 전송하지 않는다
+input.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+  e.preventDefault();
+  if (form.requestSubmit) form.requestSubmit();
+  else form.dispatchEvent(new Event('submit', { cancelable: true }));
+});
+
+const toBottom = document.getElementById('tobottom');
+toBottom.addEventListener('click', () => {
+  window.scrollTo({ top: document.documentElement.scrollHeight });
+  showToBottom(false);
+});
+window.addEventListener('scroll', () => showToBottom(!nearBottom()));
 </script>
 </body>
 </html>
