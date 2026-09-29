@@ -22,16 +22,27 @@ def _service(tmp_path, name="RAG") -> Service:
     )
 
 
+class FakeProcess:
+    """Popen 대역. poll() 이 None 이면 살아 있는 것으로 본다(agent-12)."""
+
+    def __init__(self, pid=4242, returncode=None):
+        self.pid = pid
+        self._returncode = returncode
+
+    def poll(self):
+        return self._returncode
+
+
 class SpawnSpy:
     """호출 여부를 기록하는 가짜 spawn. 중복 실행 방지 단언의 근거."""
 
-    def __init__(self, pid=4242):
+    def __init__(self, pid=4242, returncode=None):
         self.calls = []
-        self._pid = pid
+        self._process = FakeProcess(pid, returncode)
 
     def __call__(self, service):
         self.calls.append(service.name)
-        return self._pid
+        return self._process
 
 
 class HealthScript:
@@ -625,3 +636,441 @@ def test_stop_does_not_signal_when_pid_file_missing_for_both_services(entry, mon
     assert killer.calls == []                                  # 두 서비스 모두 시그널 0회
     assert len(out) == 2
     assert all("건드리지 않습니다" in line for line in out)
+
+
+# --- agent-12: 인터프리터 선택·조기 종료 감지·실패 원인 노출 ---
+
+class SleepSpy:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, seconds):
+        self.calls.append(seconds)
+
+
+# V1. 인터프리터
+
+def test_web_uses_project_venv_python(entry, write_config):
+    from src.config.settings import PROJECT_ROOT, load_settings
+
+    settings = load_settings(write_config())
+    rag, web = run.build_services(settings, entry, "local")
+
+    assert web.command[0] == str(PROJECT_ROOT / ".venv" / "bin" / "python")
+    assert rag.command[0] == str(entry / ".venv" / "bin" / "python")     # RAG 는 그대로
+
+
+def test_web_falls_back_to_current_interpreter(entry, write_config, monkeypatch):
+    import sys as _sys
+
+    from src.config.settings import load_settings
+
+    monkeypatch.setattr(run.Path, "exists", lambda self: False)
+    settings = load_settings(write_config())
+    _, web = run.build_services(settings, entry, "local")
+
+    assert web.command[0] == _sys.executable
+
+
+def test_project_python_prefers_venv():
+    from src.config.settings import PROJECT_ROOT
+
+    assert run.project_python() == str(PROJECT_ROOT / ".venv" / "bin" / "python")
+
+
+# V2. 조기 종료 즉시 실패
+
+def test_dead_child_fails_without_waiting_for_timeout(tmp_path):
+    service = _service(tmp_path)
+    spawn = SpawnSpy(pid=999, returncode=1)
+    sleep = SleepSpy()
+
+    result = start(service, timeout=90, healthy=HealthScript(False), spawn=spawn, sleep=sleep)
+
+    assert result.state == "failed"
+    assert "종료 코드 1" in result.message
+    assert len(sleep.calls) <= 1                # 90초를 기다리지 않는다
+    assert spawn.calls == ["RAG"]               # 재시도 없음
+
+
+def test_dead_child_reports_its_exit_code(tmp_path):
+    service = _service(tmp_path)
+    result = start(service, timeout=90, healthy=HealthScript(False),
+                   spawn=SpawnSpy(returncode=3), sleep=SleepSpy())
+    assert "종료 코드 3" in result.message
+
+
+# V3. 실패 후 pid 파일 정리
+
+@pytest.mark.parametrize("returncode", [1, None])
+def test_failed_start_removes_pid_file(tmp_path, returncode):
+    """died(종료 코드 있음)·timeout(None) 모두 pid 파일을 남기지 않는다."""
+    service = _service(tmp_path)
+
+    result = start(service, timeout=0, healthy=HealthScript(False),
+                   spawn=SpawnSpy(returncode=returncode), sleep=SleepSpy())
+
+    assert result.state == "failed"
+    assert not service.pid_path.exists()
+
+
+def test_retry_after_failure_spawns_again(tmp_path):
+    """실패 후 다시 실행하면 '기동 중' 분기가 아니라 새 spawn 경로로 간다."""
+    service = _service(tmp_path)
+    start(service, timeout=0, healthy=HealthScript(False), spawn=SpawnSpy(returncode=1),
+          sleep=SleepSpy())
+
+    second = SpawnSpy(pid=555)
+    result = start(service, timeout=5, healthy=HealthScript(False, True), spawn=second,
+                   sleep=_noop_sleep)
+
+    assert second.calls == ["RAG"]
+    assert result.state == "started"
+    assert service.pid_path.read_text(encoding="utf-8") == "555"
+
+
+# V4. 로그 꼬리
+
+def test_tail_log_without_file(tmp_path):
+    from src.launcher import tail_log
+
+    assert tail_log(tmp_path / "없음.log") == ""
+
+
+def test_tail_log_of_empty_file(tmp_path):
+    from src.launcher import tail_log
+
+    log = tmp_path / "x.log"
+    log.write_text("", encoding="utf-8")
+    assert tail_log(log) == ""
+
+
+def test_tail_log_returns_last_15_lines(tmp_path):
+    from src.launcher import tail_log
+
+    log = tmp_path / "x.log"
+    log.write_text("\n".join(f"line {i}" for i in range(20)), encoding="utf-8")
+
+    tail = tail_log(log).split("\n")
+
+    assert len(tail) == 15
+    assert tail[0] == "line 5" and tail[-1] == "line 19"
+
+
+def test_tail_log_skips_content_before_offset(tmp_path):
+    """이전 실행의 traceback 이 섞이지 않는다."""
+    from src.launcher import tail_log
+
+    log = tmp_path / "x.log"
+    log.write_text("이전 실행 traceback\n", encoding="utf-8")
+    offset = log.stat().st_size
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("이번 실행 오류\n")
+
+    tail = tail_log(log, offset)
+
+    assert tail == "이번 실행 오류"
+    assert "이전 실행" not in tail
+
+
+def test_tail_log_when_nothing_new(tmp_path):
+    from src.launcher import tail_log
+
+    log = tmp_path / "x.log"
+    log.write_text("옛 내용\n", encoding="utf-8")
+    assert tail_log(log, log.stat().st_size) == ""
+
+
+def test_failure_message_includes_indented_log_tail(tmp_path):
+    service = _service(tmp_path)
+    service.log_path.parent.mkdir(parents=True)
+    service.log_path.write_text("이전 실행의 옛 오류\n", encoding="utf-8")
+
+    def spawn_writing_log(svc):
+        with open(svc.log_path, "a", encoding="utf-8") as f:
+            f.write("Traceback (most recent call last):\nModuleNotFoundError: No module named 'ollama'\n")
+        return FakeProcess(pid=321, returncode=1)
+
+    result = start(service, timeout=90, healthy=HealthScript(False), spawn=spawn_writing_log,
+                   sleep=SleepSpy())
+
+    assert "─ 로그 마지막 15줄 ─" in result.message
+    assert "  ModuleNotFoundError: No module named 'ollama'" in result.message
+    assert "옛 오류" not in result.message           # 오프셋 이전 내용은 제외
+
+
+def test_failure_without_new_log_content_has_no_tail_block(tmp_path):
+    service = _service(tmp_path)
+    service.log_path.parent.mkdir(parents=True)
+    service.log_path.write_text("옛 내용\n", encoding="utf-8")
+
+    result = start(service, timeout=0, healthy=HealthScript(False), spawn=SpawnSpy(returncode=1),
+                   sleep=SleepSpy())
+
+    assert "로그 마지막" not in result.message
+    assert result.message.endswith(str(service.log_path))
+
+
+# V5. 성공 경로 회귀
+
+def test_live_child_still_starts_normally(tmp_path):
+    service = _service(tmp_path)
+    spawn = SpawnSpy(pid=1234, returncode=None)     # poll() 이 None = 살아 있음
+
+    result = start(service, timeout=5, healthy=HealthScript(False, True), spawn=spawn,
+                   sleep=_noop_sleep)
+
+    assert result.state == "started"
+    assert spawn.calls == ["RAG"]
+    assert service.pid_path.read_text(encoding="utf-8") == "1234"
+
+
+# V6. 실패 시 출력
+
+def test_browser_line_is_hidden_when_start_failed(entry, monkeypatch):
+    from src.launcher import Result
+
+    monkeypatch.setattr(run, "start",
+                        lambda service, timeout: Result("failed", "기동 실패: …")
+                        if service.name == "LangGraph" else Result("already", "이미 실행 중"))
+
+    code, out = _main(["--rag-dir", str(entry)])
+    text = "\n".join(out)
+
+    assert code == 1
+    assert "브라우저:" not in text
+    assert "종료: python run.py --stop" in text
+
+
+def test_browser_line_is_shown_on_success(entry, monkeypatch):
+    from src.launcher import Result
+
+    monkeypatch.setattr(run, "start", lambda service, timeout: Result("started", "기동 중... ok"))
+
+    code, out = _main(["--rag-dir", str(entry)])
+    text = "\n".join(out)
+
+    assert code == 0
+    assert "브라우저: http://127.0.0.1:5020" in text
+    assert "종료: python run.py --stop" in text
+
+
+# --- (Validator 추가, agent-12) 명세 V2~V5·V9 의 미커버 분기 ---
+
+
+def _closed_port() -> int:
+    """아무도 듣지 않는 로컬 포트. 누군가 듣더라도 /check 가 200 이 아니면 결과는 같다."""
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+# V2/V3. died 분기를 '실제로' 타는 경우 (기존 테스트는 timeout=0 이라 timeout 분기로 빠진다)
+
+def test_died_branch_removes_pid_file_and_reports_exit_code(tmp_path):
+    service = _service(tmp_path)
+    spawn = SpawnSpy(pid=777, returncode=2)
+    sleep = SleepSpy()
+
+    result = start(service, timeout=90, healthy=HealthScript(False), spawn=spawn, sleep=sleep)
+
+    assert result.state == "failed"
+    assert "프로세스가 즉시 종료되었습니다 (종료 코드 2)" in result.message
+    assert not service.pid_path.exists()        # died 경로에서도 pid 파일을 남기지 않는다
+    assert len(sleep.calls) <= 1
+    assert spawn.calls == ["RAG"]
+
+
+def test_timeout_branch_keeps_timeout_wording_and_removes_pid_file(tmp_path):
+    """자식이 살아 있는데 /check 가 끝내 200 이 아니면 timeout 문구 + pid 파일 삭제."""
+    service = _service(tmp_path)
+    sleep = SleepSpy()
+
+    result = start(service, timeout=0.05, healthy=HealthScript(False),
+                   spawn=SpawnSpy(returncode=None), sleep=sleep)
+
+    assert result.state == "failed"
+    assert "안에 응답이 없습니다" in result.message
+    assert "종료 코드" not in result.message
+    assert not service.pid_path.exists()
+    assert sleep.calls                           # timeout 분기는 실제로 폴링을 돈다
+
+
+def test_existing_pid_wait_path_keeps_pid_file_on_timeout(tmp_path, monkeypatch):
+    """기존 PID 파일 대기 경로는 agent-12 이후에도 동작이 바뀌지 않는다(pid 파일 유지)."""
+    from src import launcher
+
+    service = _service(tmp_path)
+    service.pid_path.parent.mkdir(parents=True)
+    service.pid_path.write_text("4321", encoding="utf-8")
+    monkeypatch.setattr(launcher, "is_alive", lambda pid: True)
+    spawn = SpawnSpy()
+
+    result = start(service, timeout=0.05, healthy=HealthScript(False), spawn=spawn,
+                   sleep=_noop_sleep)
+
+    assert result.state == "failed"
+    assert "기동 대기 시간 초과 (pid 4321)" in result.message
+    assert spawn.calls == []                     # 남의 기동 중 프로세스를 다시 띄우지 않는다
+    assert service.pid_path.exists()             # 이 경로에서는 지우지 않는다
+    assert "로그 마지막" not in result.message   # 꼬리는 신규 spawn 경로에만 붙는다
+
+
+# V2. _wait_healthy 3-상태 자체
+
+def test_wait_healthy_returns_died_without_sleeping():
+    from src.launcher import _wait_healthy
+
+    service = _service(Path("/tmp"))
+    sleep = SleepSpy()
+
+    outcome = _wait_healthy(service, 90, HealthScript(False), sleep, child_exited=lambda: True)
+
+    assert outcome == "died"
+    assert sleep.calls == []
+
+
+def test_wait_healthy_prefers_ok_when_healthy_and_exited():
+    """죽기 직전에 /check 200 이 떴다면 기동 성공으로 본다(healthy 를 먼저 확인)."""
+    from src.launcher import _wait_healthy
+
+    outcome = _wait_healthy(_service(Path("/tmp")), 90, HealthScript(True), SleepSpy(),
+                            child_exited=lambda: True)
+    assert outcome == "ok"
+
+
+def test_wait_healthy_default_child_exited_never_dies():
+    """기본값은 False — 기존 PID 대기 경로의 동작을 바꾸지 않는다."""
+    from src.launcher import _wait_healthy
+
+    assert _wait_healthy(_service(Path("/tmp")), 0.05, HealthScript(False), _noop_sleep) == "timeout"
+
+
+# V4. tail_log 경계
+
+def test_tail_log_with_offset_past_end_of_file(tmp_path):
+    from src.launcher import tail_log
+
+    log = tmp_path / "x.log"
+    log.write_text("내용\n", encoding="utf-8")
+    assert tail_log(log, log.stat().st_size + 500) == ""
+
+
+def test_tail_log_ignores_blank_only_new_content(tmp_path):
+    from src.launcher import tail_log
+
+    log = tmp_path / "x.log"
+    log.write_text("옛 내용\n", encoding="utf-8")
+    offset = log.stat().st_size
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("\n   \n\n")
+    assert tail_log(log, offset) == ""
+
+
+def test_tail_log_honours_custom_line_count(tmp_path):
+    from src.launcher import tail_log
+
+    log = tmp_path / "x.log"
+    log.write_text("\n".join(f"line {i}" for i in range(10)), encoding="utf-8")
+    assert tail_log(log, 0, lines=3).split("\n") == ["line 7", "line 8", "line 9"]
+
+
+def test_tail_log_on_unreadable_path_returns_empty(tmp_path):
+    """디렉터리 등 열 수 없는 경로에서도 예외를 내지 않는다."""
+    from src.launcher import tail_log
+
+    assert tail_log(tmp_path) == ""
+
+
+def test_long_previous_log_never_leaks_into_failure_tail(tmp_path):
+    """이전 실행이 15줄을 훨씬 넘어도 꼬리에는 이번 실행분만 나온다."""
+    service = _service(tmp_path)
+    service.log_path.parent.mkdir(parents=True)
+    service.log_path.write_text("\n".join(f"예전 오류 {i}" for i in range(50)) + "\n",
+                                encoding="utf-8")
+
+    def spawn_writing_log(svc):
+        with open(svc.log_path, "a", encoding="utf-8") as f:
+            f.write("이번 실행 오류 A\n이번 실행 오류 B\n")
+        return FakeProcess(pid=11, returncode=1)
+
+    result = start(service, timeout=90, healthy=HealthScript(False), spawn=spawn_writing_log,
+                   sleep=SleepSpy())
+
+    assert "예전 오류" not in result.message
+    assert "  이번 실행 오류 A" in result.message
+    assert "  이번 실행 오류 B" in result.message
+
+
+# V5/F2. spawn_process 의 실제 반환형
+
+def test_spawn_process_returns_object_with_pid_and_poll(tmp_path):
+    import sys as _sys
+
+    from src.launcher import spawn_process
+
+    service = Service(
+        name="probe",
+        health_url=f"http://127.0.0.1:{_closed_port()}/check",
+        url="http://127.0.0.1:0",
+        cwd=tmp_path,
+        command=[_sys.executable, "-c", "pass"],
+        log_path=tmp_path / "logs" / "probe.log",
+        pid_path=tmp_path / "logs" / "probe.pid",
+    )
+
+    process = spawn_process(service)
+    try:
+        assert isinstance(process.pid, int) and process.pid > 0
+        assert process.wait(timeout=30) == 0      # poll() 로 회수할 수 있는 실제 자식
+        assert process.poll() == 0
+    finally:
+        process.wait(timeout=30)
+    assert service.log_path.exists()
+
+
+# V9-②. 실제 자식이 즉시 죽는 경로 — timeout 을 기다리지 않는다(벽시계 단언)
+
+def test_real_child_failure_returns_in_seconds_not_at_timeout(tmp_path):
+    import sys as _sys
+    import time as _time
+
+    service = Service(
+        name="BOOM",
+        health_url=f"http://127.0.0.1:{_closed_port()}/check",
+        url="http://127.0.0.1:0",
+        cwd=tmp_path,
+        command=[_sys.executable, "-c", "import sys; sys.stderr.write('BOOM\\n'); sys.exit(3)"],
+        log_path=tmp_path / "logs" / "boom.log",
+        pid_path=tmp_path / "logs" / "boom.pid",
+    )
+
+    begin = _time.monotonic()
+    result = start(service, timeout=90)          # healthy/spawn 을 주입하지 않은 실제 경로
+    elapsed = _time.monotonic() - begin
+
+    assert result.state == "failed"
+    assert elapsed < 15                          # 90초를 기다리지 않는다
+    assert "종료 코드 3" in result.message
+    assert "  BOOM" in result.message
+    assert not service.pid_path.exists()
+
+
+# V1. project_python 폴백을 직접 확인
+
+def test_project_python_falls_back_without_venv(tmp_path, monkeypatch):
+    import sys as _sys
+
+    monkeypatch.setattr(run, "PROJECT_ROOT", tmp_path)       # .venv 가 없는 루트
+    assert run.project_python() == _sys.executable
+
+
+def test_project_python_uses_venv_when_present(tmp_path, monkeypatch):
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(run, "PROJECT_ROOT", tmp_path)
+
+    assert run.project_python() == str(venv_python)

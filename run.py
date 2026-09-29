@@ -19,6 +19,15 @@ WEB_MARKER = "web.py"
 LABEL_WIDTH = 12
 
 
+def project_python() -> str:
+    """프로젝트 venv 를 우선한다. 없으면 현재 인터프리터로 폴백.
+
+    `python3 run.py` 로 실행해도 웹 서버가 의존성 있는 파이썬으로 뜨게 한다.
+    """
+    candidate = PROJECT_ROOT / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else sys.executable
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RAG + LangGraph 웹 서버 기동(중복 실행 방지)")
     parser.add_argument("--active-profile", default="local", help="두 서비스에 함께 넘길 프로파일 이름")
@@ -46,7 +55,7 @@ def build_services(settings, rag_dir: Path, profile: str) -> tuple[Service, Serv
         health_url=f"{web_url}/check",
         url=web_url,
         cwd=PROJECT_ROOT,
-        command=[sys.executable, "web.py", f"--active-profile={profile}"],
+        command=[project_python(), "web.py", f"--active-profile={profile}"],
         log_path=LOG_DIR / "web.log",
         pid_path=LOG_DIR / "web.pid",
     )
@@ -119,7 +128,8 @@ def main(argv=None, out=print) -> int:
     check_ollama(settings, out=out)
     code = do_start(services, args.timeout, out=out)
     out("")
-    out(f"브라우저: {services[1].url}")
+    if code == 0:                  # 실패했는데 주소를 안내하면 오해를 부른다
+        out(f"브라우저: {services[1].url}")
     out("종료: python run.py --stop  (이 스크립트가 띄운 것만 내려갑니다)")
     return code
 

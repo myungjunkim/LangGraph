@@ -13,7 +13,7 @@ StateGraph(AgentState)
      │ ChatOllama(qwen3:14b).bind_tools([...])      ├─ search_confluence(query)
      │                                              └─ search_openapi(query)
      │                                                   └─ POST /v1/search (RAG 서버)
-   InMemorySaver ─ 멀티턴 기억(프로세스 단위, 종료 시 소실)
+   SqliteSaver(CLI) / AsyncSqliteSaver(웹) ─ 멀티턴 기억(data/checkpoints.sqlite, 재시작 후에도 유지)
 ```
 
 - 답변 생성은 에이전트 LLM 이 한다. RAG 의 `/v1/ask` 는 쓰지 않고 원본 청크만 받아온다.
@@ -38,13 +38,28 @@ LangGraph   : 기동 중... ok (7초)  http://127.0.0.1:5020   로그 logs/web.l
 종료: python run.py --stop  (이 스크립트가 띄운 것만 내려갑니다)
 ```
 
+기동에 실패하면 원인이 함께 나온다.
+
+```
+LangGraph   : 기동 실패: 프로세스가 즉시 종료되었습니다 (종료 코드 1). 로그 /…/logs/web.log
+  ─ 로그 마지막 15줄 ─
+  Traceback (most recent call last):
+  ModuleNotFoundError: No module named 'ollama'
+
+종료: python run.py --stop  (이 스크립트가 띄운 것만 내려갑니다)
+```
+
 | 인자 | 기본값 | 설명 |
 |---|---|---|
 | `--active-profile` | `local` | 두 서비스에 같은 값을 넘긴다 |
 | `--rag-dir` | `../RAG` | RAG 저장소 경로 |
 | `--timeout` | `90` | 기동 후 `/check` 200 을 기다리는 최대 초(RAG 인덱스 로드에 시간이 걸린다) |
 
+- **어느 파이썬으로 실행해도 된다.** `python3 run.py` 로 실행해도 웹 서버는 프로젝트 `.venv/bin/python`(없으면 현재
+  인터프리터)으로 띄우고, RAG 는 `<rag-dir>/.venv/bin/python` 으로 띄운다.
 - 실행 중 판정은 포트 점유가 아니라 **`/check` 200** 이다. 다른 사람·다른 터미널이 띄운 서버는 그대로 둔다.
+- **기동한 프로세스가 곧바로 죽으면 `--timeout` 을 기다리지 않고 즉시 실패**하고, 종료 코드와 함께 이번 실행에서 쌓인
+  로그 마지막 15줄을 화면에 보여준다(이전 실행의 오류는 섞이지 않는다). 기동에 실패하면 `브라우저:` 줄을 출력하지 않는다.
 - `--stop` 은 **이 스크립트가 만든 PID 파일 + 프로세스 명령줄 확인**을 모두 통과한 프로세스에만 `SIGTERM` 을 보낸다.
   강제 종료(`SIGKILL`)는 하지 않는다. PID 파일이 없으면 "다른 프로세스가 사용 중" 으로 알리고 아무것도 하지 않는다.
 - **Ollama 는 확인만 한다.** 없으면 `ollama serve`(또는 `brew services start ollama`), 모델이 없으면
