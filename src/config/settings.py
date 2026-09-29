@@ -21,6 +21,9 @@ class Settings:
     host: str
     port: int
     checkpoint_db: Path
+    api_services: dict[str, str]
+    api_timeout: float
+    api_max_chars: int
 
 
 def config_path_for(profile: str) -> Path:
@@ -50,6 +53,7 @@ def load_settings(path: str | Path) -> Settings:
     agent = parser["agent"]
     fastapi = parser["fastapi"]
     checkpoint = parser["checkpoint"]
+    api = parser["api"]
     return Settings(
         rag_base_url=rag["base-url"],
         rag_search_path=rag["search-path"],
@@ -64,4 +68,7 @@ def load_settings(path: str | Path) -> Settings:
         host=fastapi["host"],
         port=int(fastapi["port"]),
         checkpoint_db=_resolve_path(checkpoint["db-path"]),
+        api_services=dict(parser["api-services"]),
+        api_timeout=float(api["timeout"]),
+        api_max_chars=int(api["max-response-chars"]),
     )

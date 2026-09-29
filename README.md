@@ -17,6 +17,8 @@ StateGraph(AgentState)
 ```
 
 - 답변 생성은 에이전트 LLM 이 한다. RAG 의 `/v1/ask` 는 쓰지 않고 원본 청크만 받아온다.
+- 매 턴 시스템 메시지 맨 앞에 **현재 시각**(예: `현재 시각: 2026-09-29 (화) 14:23 KST`)을 넣어 준다.
+  날짜·요일 질문에 지어내지 않고 이 값을 그대로 쓴다(서버 로컬 타임존 기준, 대화 기록에는 저장하지 않는다).
 - 사내 문서를 외부 API 로 보내지 않는다. LLM 은 로컬 Ollama `qwen3:14b`.
 
 ## 빠른 시작
@@ -100,6 +102,12 @@ LangGraph   : 기동 실패: 프로세스가 즉시 종료되었습니다 (종�
    | `[ollama]` | `base-url`, `llm-model`, `num-ctx`, `temperature`, `llm-timeout` | 에이전트 LLM |
    | `[agent]` | `recursion-limit` | 한 턴에서 허용할 그래프 스텝 수(도구 호출 루프 방지) |
    | `[fastapi]` | `host`, `port` | 웹 서버 바인드 주소·포트. 팀원에게 공개하려면 `host=0.0.0.0` |
+   | `[api-services]` | `<서비스 이름>=<QA base URL>` | `call_api` 가 호출할 수 있는 서비스 허용 목록 |
+   | `[api]` | `timeout`, `max-response-chars` | 실호출 타임아웃(초), 응답 본문 절단 길이 |
+
+   **`[api-services]`·`[api]` 섹션도 필수다.** 실호출 도구가 추가되면서 생긴 섹션이라,
+   그 이전에 복사해 둔 `config_local.ini` 에는 없어 `KeyError: 'api-services'` 로 멈춘다.
+   `[checkpoint]` 와 마찬가지로 `.example` 의 해당 섹션을 복사해 넣으면 된다.
 
    **`[fastapi]` 섹션은 필수다.** 웹 서버가 추가되면서 `host`, `port` 를 읽게 되어, 그 이전에 복사해 둔
    `resources/config_local.ini` 에는 이 섹션이 없다. 그대로 두면 `python main.py` / `python web.py` 가 모두
@@ -177,6 +185,30 @@ SSE 이벤트 계약:
 - [ ] RAG 서버를 내린 뒤 질문 → 에이전트가 오류를 답변으로 설명하고 정상 종료(빨간 오류 아님)
 - [ ] 웹 서버(5020)를 내린 뒤 질문 → 빨간 `요청 실패:` 표시
 
+## API 실호출 (GET 전용)
+
+에이전트가 OpenAPI 스펙을 설명하는 데 그치지 않고, 사용자가 요청하면 **실제로 GET 요청을 보내 응답까지** 보여준다.
+
+```
+> 메시지 등록 API 스펙을 실제로 불러와줘
+[검색] search_openapi(메시지 등록 API)
+[호출] call_api(message-api /openapi.json)
+HTTP 200 으로 응답했고 ...
+```
+
+- **GET 전용이다.** 도구에 메서드·헤더·바디 인자가 아예 없어서 POST/PUT/PATCH/DELETE 를 보낼 경로가 없다.
+- **QA 환경만 호출한다.** 이중 가드다 — ① `[api-services]` 에 등재된 이름만 부를 수 있고,
+  ② 그 주소가 `https` + 호스트에 `qa` 라벨 + 경로 없는 순수 origin 이어야 한다. ②는 코드 상수라 설정으로 끌 수 없다.
+  운영 주소를 설정에 적으면 **서버 기동 시점에 `ValueError`** 로 실패한다(조용히 넘어가지 않는다).
+- 리다이렉트를 따라가지 않는다(`follow_redirects=False`). 30x 는 그대로 결과로 보여준다.
+- 4xx·5xx 는 예외가 아니라 상태 코드와 본문을 그대로 돌려줘서 에이전트가 원인을 설명할 수 있다.
+- 응답 본문은 `[api] max-response-chars` 로 자르고, 잘리면 원본 길이를 함께 알려준다.
+- 에이전트는 **사용자가 요청했을 때만** 호출한다(`SYSTEM_PROMPT` 규칙 4). 일반 질문에는 검색만 한다.
+- 인증은 쓰지 않는다(현재 QA API 는 인증 불필요). 운영 호출·쓰기 요청은 이 프로젝트 범위 밖이다.
+
+서비스를 추가하려면 `config_local.ini` 의 `[api-services]` 에 `이름=https://…qa….example.com` 한 줄을 넣고
+서버를 다시 띄운다. 항목이 하나도 없으면 실호출 도구 없이 검색 도구 2개만으로 동작한다.
+
 ## 대화 유지 (영구 체크포인터)
 
 대화는 SQLite 파일에 저장된다. 경로는 `resources/config_local.ini` 의 `[checkpoint] db-path` 이며,
@@ -242,6 +274,7 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `test/test_web.py` | FastAPI 라우트, SSE 이벤트 순서·헤더, 멀티턴, 422 |
 | `test/test_checkpointer.py` | SQLite 영속성(재시작 후 대화 유지), `build_default_graph` 기본값 |
 | `test/test_maintenance.py` | 대화 열거·만료 선택 경계·삭제·출력 형식(임시 DB) |
+| `test/test_api_tool.py` | 운영 차단·GET 전용 계약·입력 방어(요청 미발생)·절단·표시 |
 | `test/test_launcher.py` | 중복 실행 방지(spawn 미호출), PID 파일 처리, `--stop` 안전 규칙 |
 | `test/test_web_ui.py` | `index.html` 계약(상대 경로, 이벤트 이름, CDN·innerHTML 금지) |
 | `test/test_integration_web.py` | 실제 스트리밍으로 `search`/`token`/`done` 확인 |
@@ -255,6 +288,7 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `src/llm_factory.py` | `create_chat_model(settings)` — LLM 생성 단일 지점 |
 | `src/rag_client.py` | `RagClient.search()` — `POST /v1/search` 호출 |
 | `src/tools.py` | `build_tools(client, top_k)` — `search_confluence`, `search_openapi` |
+| `src/api_tool.py` | `validate_base_url`(QA 전용 검사), `build_api_tool` — GET 전용 `call_api` |
 | `web.py` | 웹 진입점, `uvicorn.run(create_app(graph, settings))` |
 | `src/agent.py` | `SYSTEM_PROMPT`, `build_graph(chat_model, tools, checkpointer)`, `build_default_graph(settings)`, `RUNTIME_ERRORS` |
 | `src/agent.py` 의 `rewrite` 노드 | 후속 질문을 앞 대화 없이도 이해되는 독립 질문(`REWRITE_PROMPT`)으로 다시 써 agent 에 힌트로 전달. 첫 턴은 LLM 호출 없이 우회 |
@@ -269,6 +303,6 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 
 ## 범위 밖
 
-사내 API 실호출, 인증/인가·HTTPS, 자동 정리(기동 시·주기 실행), 웹 UI 에서의 대화 목록·삭제,
+쓰기 요청(POST/PUT/PATCH/DELETE)·운영 환경 호출·API 인증, 인증/인가·HTTPS, 자동 정리(기동 시·주기 실행), 웹 UI 에서의 대화 목록·삭제,
 대화 내보내기·백업, 사용자별 분리, Ollama 자동 기동·모델 `pull`, 포그라운드 감시 모드·자동 재시작,
 Docker/launchd/systemd, `langgraph dev` 노출은 범위에 없다.

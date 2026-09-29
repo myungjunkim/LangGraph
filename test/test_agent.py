@@ -1,9 +1,12 @@
+from datetime import datetime, timedelta, timezone
+
 import httpx
+import pytest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from src.agent import HINT_PREFIX, REWRITE_PROMPT, SYSTEM_PROMPT, build_graph
+from src.agent import HINT_PREFIX, REWRITE_PROMPT, SYSTEM_PROMPT, build_graph, current_time_line
 from src.tools import build_tools
 from test.conftest import FakeClient
 
@@ -59,7 +62,8 @@ def test_system_prompt_is_prepended_but_not_stored():
 
     first_call = model.received[0]
     assert isinstance(first_call[0], SystemMessage)
-    assert first_call[0].content == SYSTEM_PROMPT
+    assert first_call[0].content.startswith("현재 시각: ")      # agent-14: 시각이 맨 앞
+    assert SYSTEM_PROMPT in first_call[0].content
     assert not any(isinstance(m, SystemMessage) for m in state["messages"])
 
 
@@ -222,7 +226,7 @@ def test_first_turn_skips_rewrite():
     state = graph.invoke({"messages": [HumanMessage("메시지 등록 API 알려줘")]}, config=_thread())
 
     assert len(model.received) == 1                        # agent 호출 1회뿐
-    assert model.received[0][0].content.startswith(SYSTEM_PROMPT)
+    assert SYSTEM_PROMPT in model.received[0][0].content
     assert state["standalone_question"] == ""
 
 
@@ -248,7 +252,7 @@ def test_followup_turn_rewrites_and_passes_hint_to_agent():
         "메시지 등록 API 알려줘", "POST /v1/messages 입니다.", "방금 알려준 API의 v1이랑 v2 차이는?"]
 
     agent_system = model.received[3][0]
-    assert agent_system.content.startswith(SYSTEM_PROMPT)
+    assert SYSTEM_PROMPT in agent_system.content
     assert HINT_PREFIX + "메시지 등록 API의 v1과 v2 차이" in agent_system.content
 
     assert state["standalone_question"] == "메시지 등록 API의 v1과 v2 차이"
@@ -276,7 +280,7 @@ def test_empty_rewrite_leaves_no_hint_and_does_not_reuse_previous_turn():
     assert HINT_PREFIX in model.received[2][0].content        # 2턴 agent 에는 힌트가 있었다
     assert state["standalone_question"] == ""
     assert HINT_PREFIX not in model.received[4][0].content    # 3턴 agent 에는 힌트 없음
-    assert model.received[4][0].content == SYSTEM_PROMPT
+    assert SYSTEM_PROMPT in model.received[4][0].content
 
 
 # --- agent-08 보강 (Validator) ---
@@ -355,7 +359,9 @@ def test_exactly_empty_rewrite_response_adds_no_hint():
     state = graph.invoke({"messages": [HumanMessage("둘째 질문")]}, config=_thread("empty"))
 
     assert state["standalone_question"] == ""
-    assert model.received[2][0].content == SYSTEM_PROMPT
+    assert SYSTEM_PROMPT in model.received[2][0].content
+    # agent-14 로 `== SYSTEM_PROMPT` 가 `in` 으로 완화되면서 빠진 "힌트 없음" 보장을 되살린다(Validator)
+    assert HINT_PREFIX not in model.received[2][0].content
 
 
 def test_build_graph_public_signature_is_unchanged():
@@ -383,3 +389,225 @@ def test_standalone_question_is_checkpointed_without_touching_messages():
     assert values["standalone_question"] == "메시지 등록 API의 v1과 v2 차이"
     assert [m.content for m in values["messages"]] == [
         "메시지 등록 API 알려줘", "1턴 답변", "v1이랑 v2 차이는?", "2턴 답변"]
+
+
+# --- agent-14: 현재 시각 주입 + 근거 없는 추측 억제 ---
+
+KST = timezone(timedelta(hours=9), "KST")
+
+
+# T1. 시각 문자열
+
+def test_current_time_line_format():
+    assert current_time_line(datetime(2026, 9, 29, 14, 23, tzinfo=KST)) == \
+        "현재 시각: 2026-09-29 (화) 14:23 KST"
+
+
+@pytest.mark.parametrize("day, weekday", [(28, "월"), (29, "화"), (30, "수"),
+                                          (1, "화"), (2, "수"), (3, "목"), (4, "금"),
+                                          (5, "토"), (6, "일")])
+def test_current_time_line_maps_every_weekday(day, weekday):
+    """요일은 로케일이 아니라 직접 매핑한다(%a 면 'Tue' 가 된다)."""
+    line = current_time_line(datetime(2026, 9, day, 9, 0, tzinfo=KST))
+    assert f"({weekday})" in line
+    assert "Tue" not in line and "Mon" not in line
+
+
+def test_current_time_line_uses_offset_when_zone_name_is_empty():
+    anonymous = timezone(timedelta(hours=9))        # 이름 없는 타임존
+    assert current_time_line(datetime(2026, 9, 29, 14, 23, tzinfo=anonymous)) == \
+        "현재 시각: 2026-09-29 (화) 14:23 UTC+09:00"
+
+
+def test_current_time_line_without_argument_uses_now():
+    line = current_time_line()
+    assert line.startswith("현재 시각: ")
+    assert datetime.now().astimezone().strftime("%Y-%m-%d") in line
+
+
+# T2. 주입 위치
+
+def test_system_message_starts_with_time_then_prompt():
+    graph, model = _graph([AIMessage("답")])
+
+    graph.invoke({"messages": [HumanMessage("오늘 며칠이야?")]})
+
+    content = model.received[0][0].content
+    assert content.startswith("현재 시각: ")
+    assert SYSTEM_PROMPT in content
+    assert content.index("현재 시각: ") < content.index(SYSTEM_PROMPT)
+
+
+def test_hint_stays_at_the_end_after_time_injection():
+    """순서: 시각 → SYSTEM_PROMPT → 힌트(agent-08)."""
+    graph, model = _graph([
+        AIMessage("1턴 답변"),
+        AIMessage("메시지 등록 API의 v1과 v2 차이"),      # 2턴 rewrite
+        AIMessage("2턴 답변"),
+    ], checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("메시지 등록 API 알려줘")]}, config=_thread("order"))
+    graph.invoke({"messages": [HumanMessage("v1 이랑 v2 차이는?")]}, config=_thread("order"))
+
+    content = model.received[2][0].content
+    assert content.index("현재 시각: ") < content.index(SYSTEM_PROMPT) < content.index(HINT_PREFIX)
+    assert content.rstrip().endswith("앞 대화의 답변만으로 충분하면 검색하지 않아도 됩니다.")
+
+
+# T3. 매 턴 갱신
+
+def test_time_is_recomputed_every_turn(monkeypatch):
+    import src.agent as agent_module
+
+    values = iter(["현재 시각: 2026-09-29 (화) 09:00 KST", "현재 시각: 2026-09-30 (수) 10:00 KST"])
+    monkeypatch.setattr(agent_module, "current_time_line", lambda: next(values))
+
+    graph, model = _graph([AIMessage("1턴 답변"), AIMessage("독립 질문"), AIMessage("2턴 답변")],
+                          checkpointer=InMemorySaver())
+    graph.invoke({"messages": [HumanMessage("첫 질문")]}, config=_thread("clock"))
+    graph.invoke({"messages": [HumanMessage("둘째 질문")]}, config=_thread("clock"))
+
+    first_turn = model.received[0][0].content
+    second_turn = model.received[2][0].content          # rewrite 다음의 agent 호출
+    assert first_turn.startswith("현재 시각: 2026-09-29 (화) 09:00 KST")
+    assert second_turn.startswith("현재 시각: 2026-09-30 (수) 10:00 KST")
+    assert "2026-09-29" not in second_turn              # 앞 턴 시각이 남지 않는다
+
+
+# T4. 상태 미오염
+
+def test_time_is_not_stored_in_conversation_state():
+    graph, _ = _graph([AIMessage("1턴 답변"), AIMessage("독립 질문"), AIMessage("2턴 답변")],
+                      checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("첫 질문")]}, config=_thread("clean"))
+    state = graph.invoke({"messages": [HumanMessage("둘째 질문")]}, config=_thread("clean"))
+
+    assert [type(m).__name__ for m in state["messages"]] == [
+        "HumanMessage", "AIMessage", "HumanMessage", "AIMessage"]
+    assert not any(isinstance(m, SystemMessage) for m in state["messages"])
+    assert all("현재 시각:" not in str(m.content) for m in state["messages"])
+
+
+# T5. 프롬프트
+
+def test_prompt_rules_are_unchanged_by_time_injection():
+    """agent-14 는 시각 주입만 남기고 프롬프트는 agent-13 상태 그대로 둔다(리드 판단 (6))."""
+    assert "1. 답하기 전에 반드시 검색 도구로 근거를 찾습니다. 인사말이나 일반 상식 질문은 예외입니다." in SYSTEM_PROMPT
+    assert "현재 시각" not in SYSTEM_PROMPT          # 시각은 프롬프트가 아니라 런타임 주입
+    # 거절 경로는 기존 규칙 5 가 담당한다
+    assert '5. 검색 결과에 없는 내용은 추측하지 않습니다. 근거를 찾지 못하면 "관련 내용을 문서에서 찾지 못했습니다." 라고 답합니다.' \
+        in SYSTEM_PROMPT
+
+
+def test_previous_rules_keep_their_wording():
+    """agent-06 규칙 3·agent-13 규칙 4 는 번호만 이동하고 문구는 그대로다."""
+    assert ("3. 후속 질문(\"그 API\", \"방금 알려준 것\")이면 검색어를 앞 대화에서 다룬 대상 이름"
+            "(API 이름·기능명·경로)으로 시작해,") in SYSTEM_PROMPT
+    assert "앞 대화 없이도 이해되는 독립 검색어로 만듭니다. 앞 대화에 나오지 않은 이름을 검색어에 넣지 않습니다." in SYSTEM_PROMPT
+    assert "4. 사용자가 실제 호출·시험·응답 확인을 요청하면 call_api 로 GET 요청을 보냅니다." in SYSTEM_PROMPT
+    assert "요청하지 않았는데 임의로 호출하지 않습니다." in SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("number", range(1, 9))
+def test_prompt_has_eight_numbered_rules(number):
+    assert f"\n{number}. " in SYSTEM_PROMPT
+    assert "\n9. " not in SYSTEM_PROMPT
+
+
+def test_rewrite_prompt_is_untouched():
+    assert REWRITE_PROMPT.startswith("다음은 사용자와 어시스턴트의 대화입니다.")
+    assert "현재 시각" not in REWRITE_PROMPT
+
+
+# --- agent-14 보강 (Validator) ---
+
+def test_current_time_line_uses_offset_for_negative_and_half_hour_zones():
+    """이름 없는 타임존 대체 표기가 음수 오프셋·30분 오프셋에서도 UTC±HH:MM 형식이어야 한다."""
+    assert current_time_line(datetime(2026, 9, 29, 14, 23, tzinfo=timezone(timedelta(hours=-5)))) == \
+        "현재 시각: 2026-09-29 (화) 14:23 UTC-05:00"
+    assert current_time_line(
+        datetime(2026, 9, 29, 14, 23, tzinfo=timezone(timedelta(hours=5, minutes=30)))) == \
+        "현재 시각: 2026-09-29 (화) 14:23 UTC+05:30"
+
+
+def test_current_time_line_keeps_a_named_zone_as_is():
+    """이름이 있으면 오프셋으로 바꾸지 않고 그 이름을 그대로 쓴다."""
+    assert current_time_line(
+        datetime(2026, 1, 1, 0, 5, tzinfo=timezone(timedelta(0), "UTC"))).endswith("00:05 UTC")
+
+
+def test_current_time_line_pads_hour_and_minute():
+    """한 자리 시/분도 두 자리로 찍혀 형식이 흔들리지 않는다."""
+    assert current_time_line(datetime(2026, 9, 29, 4, 5, tzinfo=KST)) == \
+        "현재 시각: 2026-09-29 (화) 04:05 KST"
+
+
+def test_time_line_is_separated_from_the_prompt_by_a_blank_line():
+    """시각 줄이 SYSTEM_PROMPT 첫 줄에 붙어버리지 않는다(빈 줄 1개로 분리)."""
+    graph, model = _graph([AIMessage("답")])
+
+    graph.invoke({"messages": [HumanMessage("오늘 며칠이야?")]})
+
+    content = model.received[0][0].content
+    first_line, blank, rest = content.split("\n", 2)
+    assert first_line == current_time_line() or first_line.startswith("현재 시각: ")
+    assert blank == ""
+    assert rest.startswith(SYSTEM_PROMPT)
+
+
+def test_only_one_time_line_is_injected_per_call():
+    """멀티턴에서 시각 줄이 누적되지 않는다."""
+    graph, model = _graph([AIMessage("1턴 답변"), AIMessage("독립 질문"), AIMessage("2턴 답변")],
+                          checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("첫 질문")]}, config=_thread("once"))
+    graph.invoke({"messages": [HumanMessage("둘째 질문")]}, config=_thread("once"))
+
+    agent_calls = [c[0].content for c in model.received if SYSTEM_PROMPT in c[0].content]
+    assert len(agent_calls) == 2                           # 1턴·2턴 agent 호출
+    for content in agent_calls:
+        assert content.count("현재 시각: ") == 1
+
+
+def test_rewrite_node_gets_no_time_line():
+    """범위 제외: rewrite 노드에는 시각을 주입하지 않는다."""
+    graph, model = _graph([AIMessage("1턴 답변"), AIMessage("독립 질문"), AIMessage("2턴 답변")],
+                          checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("첫 질문")]}, config=_thread("rw"))
+    graph.invoke({"messages": [HumanMessage("둘째 질문")]}, config=_thread("rw"))
+
+    rewrite_system = model.received[1][0]                  # 2턴 rewrite 호출
+    assert isinstance(rewrite_system, SystemMessage)
+    assert "현재 시각: " not in rewrite_system.content
+    assert rewrite_system.content.startswith(REWRITE_PROMPT)
+
+
+# --- agent-14 보강 (Validator, 검증 회차 2) ---
+
+def test_withdrawn_prompt_rule_b_stays_out_of_the_system_prompt():
+    """리드 판단 (6): B(프롬프트 변경)는 전면 철회다. 되살아나면 agent-06 P4 가 회귀한다."""
+    assert "인사말처럼 정보가 필요 없는 말만 예외입니다." not in SYSTEM_PROMPT
+    assert "지어내지 않습니다" not in SYSTEM_PROMPT          # 철회한 규칙 6(초안·개정안 공통)
+    assert "모르는 것은 모른다고 답합니다" not in SYSTEM_PROMPT
+    assert SYSTEM_PROMPT.rstrip().endswith("8. 한국어로 간결하게 답합니다.")
+
+
+def test_time_line_is_reinjected_once_on_the_tool_loop_agent_call():
+    """도구 호출 뒤 agent 로 되돌아오는 호출에도 시각이 1개만 들어가고 힌트는 맨 뒤를 지킨다."""
+    graph, model = _graph([
+        AIMessage("1턴 답변"),
+        AIMessage("메시지 등록 API의 v1과 v2 차이"),          # 2턴 rewrite
+        _tool_call_message(query="메시지 등록 API v1 v2"),     # 2턴 agent → 도구 호출
+        AIMessage("2턴 최종 답변"),                            # 도구 결과 뒤 agent 재진입
+    ], checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("메시지 등록 API 알려줘")]}, config=_thread("loop"))
+    graph.invoke({"messages": [HumanMessage("v1 이랑 v2 차이는?")]}, config=_thread("loop"))
+
+    after_tool = model.received[3][0]                          # 도구 실행 뒤의 agent 호출
+    assert isinstance(after_tool, SystemMessage)
+    assert after_tool.content.count("현재 시각: ") == 1
+    assert after_tool.content.startswith("현재 시각: ")
+    assert after_tool.content.index(SYSTEM_PROMPT) < after_tool.content.index(HINT_PREFIX)

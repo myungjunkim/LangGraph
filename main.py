@@ -8,7 +8,7 @@ import uuid
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.agent import RUNTIME_ERRORS, build_default_graph
+from src.agent import API_TOOL_NAME, RUNTIME_ERRORS, build_default_graph, tool_call_summary
 from src.checkpointer import sqlite_saver
 from src.config.settings import Settings, config_path_for, load_settings
 
@@ -23,7 +23,8 @@ def run_turn(graph, config: dict, text: str, out=print) -> None:
             continue
         if message.tool_calls:
             for call in message.tool_calls:
-                out(f"[검색] {call['name']}({call['args'].get('query', '')})")
+                label = "[호출]" if call["name"] == API_TOOL_NAME else "[검색]"
+                out(f"{label} {call['name']}({tool_call_summary(call['args'])})")
         else:
             out(message.content)
 

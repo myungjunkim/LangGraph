@@ -118,3 +118,30 @@ def test_followup_question_reuses_context_without_losing_the_api_name(live_env, 
         print(f"\n[P6] 2턴 검색어 {queries}, 답변 {len(answer)}자")
     assert not queries or any(any(s in q.lower() for s in MESSAGE_SUBJECT) for q in queries), \
         f"queries={queries}"
+
+
+# --- agent-14 T6: 날짜 게이트 (Validator) ---
+
+@pytest.mark.parametrize("run", [0, 1, 2])
+def test_today_question_answers_with_the_real_current_date(live_env, capsys, run):
+    """T6 게이트: "오늘 몇월 몇일이야?" 답변에 실행 시점의 연·월·일 숫자가 들어 있어야 한다.
+
+    형식은 자유(`2026-09-29`, `9월 29일` …)라 숫자 존재로만 판정한다. 3회 모두 통과해야 한다.
+    """
+    from datetime import datetime
+
+    from src.agent import build_default_graph
+
+    settings = live_env
+    now = datetime.now().astimezone()
+    config = {"configurable": {"thread_id": f"agent-14-t6-{now:%Y%m%d%H%M%S}-{run}"},
+              "recursion_limit": settings.recursion_limit}
+    state = build_default_graph(settings).invoke(
+        {"messages": [HumanMessage("오늘 몇월 몇일이야?")]}, config=config)
+    answer = state["messages"][-1].content
+
+    with capsys.disabled():
+        print(f"\n[T6-{run}] {answer!r}")
+    digits = [str(now.year), str(now.month), str(now.day)]
+    missing = [d for d in digits if d not in answer]
+    assert not missing, f"연·월·일 누락 {missing}: {answer!r}"

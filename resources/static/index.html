@@ -94,7 +94,8 @@ function addAnswer() {
 function addSearchLine(wrap, data) {
   const line = document.createElement('div');
   line.className = 'search';
-  line.textContent = `[검색] ${data.tool}(${data.query})`;
+  const label = data.tool === 'call_api' ? '[호출]' : '[검색]';
+  line.textContent = `${label} ${data.tool}(${data.query})`;
   wrap.insertBefore(line, wrap.lastChild);
   wrap.scrollIntoView({ block: 'end' });
 }

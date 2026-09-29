@@ -20,3 +20,11 @@ port=5020
 
 [checkpoint]
 db-path=data/checkpoints.sqlite
+
+[api-services]
+general-chatbot-api=https://qa-general-chatbot-api.hunet.ai
+message-api=https://message-api.qa.hunet.io
+
+[api]
+timeout=20
+max-response-chars=2000

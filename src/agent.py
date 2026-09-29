@@ -1,4 +1,6 @@
 """검색 도구를 쓰는 ReAct 형태의 LangGraph 그래프."""
+from datetime import datetime
+
 import httpx
 import ollama
 from langchain_core.language_models import BaseChatModel
@@ -11,6 +13,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from src.api_tool import build_api_tool
 from src.config.settings import Settings
 from src.llm_factory import create_chat_model
 from src.rag_client import RagClient
@@ -18,6 +21,31 @@ from src.tools import build_tools
 
 # 진입점(CLI/웹)이 한 턴을 감싸며 잡는 런타임 오류
 RUNTIME_ERRORS = (httpx.HTTPError, ollama.ResponseError, ConnectionError, GraphRecursionError)
+
+API_TOOL_NAME = "call_api"
+WEEKDAYS = "월화수목금토일"
+
+
+def current_time_line(now: datetime | None = None) -> str:
+    """현재 시각 한 줄. 로컬 타임존 기준. 예) '현재 시각: 2026-09-29 (화) 14:23 KST'
+
+    모델에 지시가 아니라 사실로 주어지는 값이라 매 턴 새로 계산한다.
+    """
+    moment = now or datetime.now().astimezone()
+    # 요일은 로케일에 의존하지 않도록 직접 매핑한다(%a 는 환경에 따라 'Tue' 가 된다)
+    weekday = WEEKDAYS[moment.weekday()]
+    # 타임존 이름이 비면 UTC 오프셋(+09:00)으로 대체한다
+    zone = moment.tzname() or moment.strftime("%z") or "UTC"
+    if zone and zone[0] in "+-" and len(zone) == 5:
+        zone = f"UTC{zone[:3]}:{zone[3:]}"
+    return f"현재 시각: {moment:%Y-%m-%d} ({weekday}) {moment:%H:%M} {zone}"
+
+
+def tool_call_summary(args: dict) -> str:
+    """도구 호출을 한 줄로 보여줄 문자열. query 인자가 있으면 기존과 똑같이 그 값만 쓴다."""
+    if "query" in args:
+        return str(args["query"])
+    return " ".join(str(value) for value in args.values())
 
 SYSTEM_PROMPT = """당신은 팀 내부 문서(Confluence)와 사내 API 명세(OpenAPI)를 근거로 답하는 어시스턴트입니다.
 
@@ -27,10 +55,13 @@ SYSTEM_PROMPT = """당신은 팀 내부 문서(Confluence)와 사내 API 명세(
    둘 다 필요하면 둘 다 호출합니다. 첫 검색 결과가 부족하면 검색어를 바꿔 다시 검색합니다.
 3. 후속 질문("그 API", "방금 알려준 것")이면 검색어를 앞 대화에서 다룬 대상 이름(API 이름·기능명·경로)으로 시작해,
    앞 대화 없이도 이해되는 독립 검색어로 만듭니다. 앞 대화에 나오지 않은 이름을 검색어에 넣지 않습니다.
-4. 검색 결과에 없는 내용은 추측하지 않습니다. 근거를 찾지 못하면 "관련 내용을 문서에서 찾지 못했습니다." 라고 답합니다.
-5. API 관련 답변에는 HTTP 메서드, 경로, 필수 파라미터/필드를 명시합니다.
-6. 답변 끝에 `출처:` 목록으로 사용한 문서의 제목과 url 을 적습니다.
-7. 한국어로 간결하게 답합니다."""
+4. 사용자가 실제 호출·시험·응답 확인을 요청하면 call_api 로 GET 요청을 보냅니다.
+   먼저 search_openapi 로 경로와 필수 파라미터를 확인한 뒤 호출합니다.
+   요청하지 않았는데 임의로 호출하지 않습니다.
+5. 검색 결과에 없는 내용은 추측하지 않습니다. 근거를 찾지 못하면 "관련 내용을 문서에서 찾지 못했습니다." 라고 답합니다.
+6. API 관련 답변에는 HTTP 메서드, 경로, 필수 파라미터/필드를 명시합니다.
+7. 답변 끝에 `출처:` 목록으로 사용한 문서의 제목과 url 을 적습니다.
+8. 한국어로 간결하게 답합니다."""
 
 REWRITE_PROMPT = """다음은 사용자와 어시스턴트의 대화입니다. 마지막 사용자 질문을 앞 대화 없이도 이해되도록 한 문장으로 다시 쓰세요.
 규칙:
@@ -66,8 +97,9 @@ def build_graph(chat_model: BaseChatModel, tools: list[BaseTool],
         return {"standalone_question": response.content.strip()}
 
     def agent(state: AgentState) -> dict:
-        # SystemMessage 는 상태에 저장하지 않고 호출 때마다 앞에 붙인다
-        system = SYSTEM_PROMPT
+        # SystemMessage 는 상태에 저장하지 않고 호출 때마다 앞에 붙인다.
+        # 현재 시각은 맨 앞(사실), agent-08 힌트는 맨 뒤 순서를 지킨다
+        system = f"{current_time_line()}\n\n{SYSTEM_PROMPT}"
         if state.get("standalone_question"):
             system += ("\n\n" + HINT_PREFIX + state["standalone_question"]
                        + "\n검색이 필요할 때 query 는 이 독립 표현을 기준으로 만듭니다."
@@ -96,4 +128,7 @@ def build_default_graph(settings: Settings,
     """
     client = RagClient(settings.rag_base_url, settings.rag_search_path, settings.rag_timeout)
     tools = build_tools(client, settings.rag_top_k)
+    if settings.api_services:              # 등재된 QA 서비스가 있을 때만 실호출 도구를 붙인다
+        tools = tools + [build_api_tool(settings.api_services, settings.api_timeout,
+                                        settings.api_max_chars)]
     return build_graph(create_chat_model(settings), tools, checkpointer or InMemorySaver())

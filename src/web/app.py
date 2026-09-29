@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.agent import RUNTIME_ERRORS
+from src.agent import RUNTIME_ERRORS, tool_call_summary
 from src.config.settings import PROJECT_ROOT, Settings
 from src.web.dto import ChatRequest, HealthResponse, ThreadMessage, ThreadMessagesResponse
 
@@ -54,7 +54,7 @@ async def stream_events(graph, config: dict, text: str) -> AsyncIterator[tuple[s
         if mode == "updates":
             for message in payload.get("agent", {}).get("messages", []):
                 for call in getattr(message, "tool_calls", None) or []:
-                    yield "search", {"tool": call["name"], "query": call["args"].get("query", "")}
+                    yield "search", {"tool": call["name"], "query": tool_call_summary(call["args"])}
         elif mode == "messages":
             # ChatOllama 는 AIMessageChunk 를, 가짜 모델은 완성된 AIMessage 를 흘린다(AIMessageChunk 는 하위 타입).
             # tool_call 만 있는 조각은 content 가 비어 있어 걸러진다.

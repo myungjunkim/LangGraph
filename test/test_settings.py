@@ -23,6 +23,10 @@ def test_load_settings_reads_all_keys(write_config):
         host="127.0.0.1",
         port=5020,
         checkpoint_db=PROJECT_ROOT / "data" / "checkpoints.sqlite",
+        api_services={"general-chatbot-api": "https://qa-general-chatbot-api.hunet.ai",
+                      "message-api": "https://message-api.qa.hunet.io"},
+        api_timeout=20.0,
+        api_max_chars=2000,
     )
 
 
@@ -38,6 +42,8 @@ def test_load_settings_converts_types(write_config):
     assert isinstance(settings.host, str)
     assert isinstance(settings.port, int)
     assert isinstance(settings.checkpoint_db, Path)
+    assert isinstance(settings.api_timeout, float)
+    assert isinstance(settings.api_max_chars, int)
 
 
 def test_settings_is_frozen(write_config):
@@ -105,3 +111,30 @@ def test_load_settings_missing_db_path_key_raises(write_config):
     text = CONFIG_TEXT.replace("db-path=data/checkpoints.sqlite", "")
     with pytest.raises(KeyError):
         load_settings(write_config(text))
+
+
+def test_api_services_is_a_name_to_url_mapping(write_config):
+    services = load_settings(write_config()).api_services
+
+    assert services == {"general-chatbot-api": "https://qa-general-chatbot-api.hunet.ai",
+                        "message-api": "https://message-api.qa.hunet.io"}
+
+
+def test_empty_api_services_section_is_allowed(write_config):
+    """항목이 없으면 빈 dict — 설정 실수로 서버가 못 뜨지는 않게 한다."""
+    text = CONFIG_TEXT.replace("general-chatbot-api=https://qa-general-chatbot-api.hunet.ai\n", "")
+    text = text.replace("message-api=https://message-api.qa.hunet.io\n", "")
+    assert load_settings(write_config(text)).api_services == {}
+
+
+def test_load_settings_missing_api_services_section_raises(write_config):
+    text = CONFIG_TEXT.replace("[api-services]\n", "[지워진섹션]\n")
+    with pytest.raises(KeyError):
+        load_settings(write_config(text))
+
+
+def test_load_settings_missing_api_section_raises(write_config):
+    text = CONFIG_TEXT.replace("[api]\ntimeout=20\nmax-response-chars=2000\n", "")
+    with pytest.raises(KeyError):
+        load_settings(write_config(text))
+

@@ -2,7 +2,7 @@
 
 - 작성일: 2026-09-29
 - 작성자: 리드
-- 상태: READY FOR REVIEW (2026-09-29, 리드 확인, 검증 회차 1) — 커밋 대기(사용자)
+- 상태: 종결 — 사용자 커밋·push 완료 (2026-09-29)
 - 계기: 사용자가 `python3 run.py`(시스템 파이썬)로 실행 → LangGraph 가 `ModuleNotFoundError: No module named 'ollama'` 로 즉시 죽었는데 **90초를 기다린 뒤 "응답이 없습니다" 만 출력**. 원인 파악에 로그를 직접 열어야 했다.
 - 선행: agent-11(커밋 `52c7943`). 저장소: `/Users/mjkim/workspace/LangGraph` 만.
 
