@@ -12,15 +12,28 @@ from test.test_agent import ScriptedChatModel
 CONFIG = {"configurable": {"thread_id": "t1"}}
 
 
+class _AnyText:
+    """실행 시점마다 달라지는 값(현재 시각 등)을 비교에서 흡수하는 자리표시자."""
+
+    def __eq__(self, other):
+        return isinstance(other, str)
+
+    def __repr__(self):
+        return "<any text>"
+
+
+ANY_TEXT = _AnyText()
+
+
 def _turn(question, answer):
     """agent-16 이후 한 턴이 남기는 메시지 내용.
 
     강제 검색 직전의 임시 답변은 상태에서 지워지므로
-    [질문, 합성 tool_calls(빈 content), 검색 결과×2, 최종 답변] 만 남는다.
+    [질문, 합성 tool_calls(빈 content), 시스템 정보, 검색 결과×2, 최종 답변] 만 남는다.
     """
     from src.tools import NO_RESULT_TEXT
 
-    return [question, "", NO_RESULT_TEXT, NO_RESULT_TEXT, answer]
+    return [question, "", ANY_TEXT, NO_RESULT_TEXT, NO_RESULT_TEXT, answer]
 
 
 def _graph_with(saver, responses):
@@ -47,9 +60,10 @@ def test_conversation_survives_new_saver_instance(tmp_path):
 
     assert [m.content for m in state["messages"]] == (
         _turn("첫 질문", "첫 답변") + _turn("두 번째 질문", "두 번째 답변"))
-    # 2턴째 agent 호출(rewrite 다음)에 1턴 대화가 함께 전달됐다
+    # 2턴째 agent 호출(rewrite 다음)에 1턴 대화가 함께 전달됐다.
+    # 마지막 질문은 독립 질문으로 치환된다(agent-16 F1) — 상태에는 원문이 남는다
     assert [m.content for m in model.received[1]][1:] == (
-        _turn("첫 질문", "첫 답변") + ["두 번째 질문"])
+        _turn("첫 질문", "첫 답변") + ["독립 질문"])
 
 
 def test_saver_creates_parent_directory(tmp_path):
@@ -150,7 +164,7 @@ def test_web_conversation_survives_app_restart(tmp_path, write_config):
 
     # 3턴째 agent 호출에 이전 프로세스의 대화가 들어 있다
     assert [m.content for m in model.received[1]][1:] == (
-        _turn("첫 질문", "1턴 답변") + _turn("둘째 질문", "2턴 답변") + ["셋째 질문"])
+        _turn("첫 질문", "1턴 답변") + _turn("둘째 질문", "2턴 답변") + ["독립"])   # F1 치환
     # agent-16 F1: 강제 검색 직전의 임시 답변은 지워지므로 턴마다 답변이 하나씩만 복원된다
     assert history == {"messages": [
         {"role": "user", "content": "첫 질문"},

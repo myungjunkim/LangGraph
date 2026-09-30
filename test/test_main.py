@@ -191,3 +191,20 @@ def test_run_turn_still_shows_tool_calls_in_real_time():
     main.run_turn(graph, {"configurable": {"thread_id": "rt"}}, "질문", out=lines.append)
 
     assert lines == ["[검색] search_openapi(메시지 등록)", "답변"]
+
+
+def test_run_turn_hides_the_system_facts_call_but_state_keeps_it(monkeypatch):
+    """agent-16 (G)·회차 2(Validator): 시스템 정보는 CLI 에 표시하지 않지만 상태에는 남는다."""
+    from langchain_core.messages import ToolMessage
+
+    graph, _ = _graph([AIMessage("임시 답변"), AIMessage("오늘은 2026년 9월 30일입니다.")])
+
+    lines = _collect(graph, "오늘 몇월 몇일이야?")
+
+    assert lines == ["오늘은 2026년 9월 30일입니다."]          # 답변 1회, system_facts 줄 없음
+    assert not any("system_facts" in line for line in lines)
+
+    state = graph.invoke({"messages": [HumanMessage("오늘 몇월 몇일이야?")]},
+                         config={"configurable": {"thread_id": "t2"}, "recursion_limit": 12})
+    facts = [m for m in state["messages"] if isinstance(m, ToolMessage) and m.name == "system_facts"]
+    assert len(facts) == 1 and "현재 시각: " in facts[0].content

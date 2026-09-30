@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from src.agent import RUNTIME_ERRORS, tool_call_summary
+from src.agent import RUNTIME_ERRORS, SYSTEM_FACTS_TOOL, tool_call_summary
 from src.config.settings import PROJECT_ROOT, Settings
 from src.web.dto import ChatRequest, HealthResponse, ThreadMessage, ThreadMessagesResponse
 
@@ -80,6 +80,8 @@ async def stream_events(graph, config: dict, text: str) -> AsyncIterator[tuple[s
                     if isinstance(message, ToolMessage):
                         sources.append(str(message.content))
                     for call in getattr(message, "tool_calls", None) or []:
+                        if call["name"] == SYSTEM_FACTS_TOOL:
+                            continue          # 검색이 아니라 시스템이 넣은 사실이라 표시하지 않는다
                         # UI 와 같은 규칙: 도구 호출 직전까지의 본문(강제 검색이 버릴 임시 답변 포함)은
                         # 최종 답변이 아니므로 누적에서 지운다. 안 그러면 출처 대조가 거짓 경고를 낸다
                         answer.clear()

@@ -238,8 +238,9 @@ def test_same_thread_id_keeps_history(settings):
     _post(client, "두 번째 질문", thread_id="same")
 
     contents = [m.content for m in model.received[-1] if isinstance(m, (HumanMessage, AIMessage))]
-    # 임시 답변은 지워지고 합성 tool_calls(빈 content)와 최종 답변만 다음 턴에 전달된다
-    assert contents == ["첫 질문", "", "첫 답변", "두 번째 질문", ""]
+    # 임시 답변은 지워지고 합성 tool_calls(빈 content)와 최종 답변만 다음 턴에 전달된다.
+    # 마지막 질문은 독립 질문으로 치환된다(agent-16 F1)
+    assert contents == ["첫 질문", "", "첫 답변", "독립 질문", ""]
 
 
 def test_different_thread_id_starts_fresh(settings):
@@ -639,3 +640,37 @@ def test_forced_search_draft_does_not_trigger_a_source_warning(settings):
     frames = _frames(_post(client, "userstore 설정을 변경하면 왜 롤링 재배포가 필요한가요?"))
 
     assert [data for name, data in frames if name == "warning"] == []
+
+
+def test_system_facts_is_not_shown_as_a_search_line(settings):
+    """agent-16 (G): 강제 검색이 함께 넣는 시스템 정보는 검색이 아니므로 [검색] 줄로 내보내지 않는다."""
+    client, _ = _app([AIMessage("임시 답변"), AIMessage("최종 답변")], settings=settings)
+
+    frames = _frames(_post(client, "오늘 몇월 몇일이야?"))
+
+    searches = [data for name, data in frames if name == "search"]
+    assert [s["tool"] for s in searches] == ["search_confluence", "search_openapi"]
+    assert all(s["tool"] != "system_facts" for s in searches)
+
+
+def test_tokens_after_the_last_search_reproduce_the_stored_answer_exactly(settings):
+    """회차 2(Validator): 강제 검색 턴의 token 계약.
+
+    UI 와 같은 규칙(`search` 에서 본문 초기화)으로 이어붙이면 저장된 최종 답변과 정확히 같다
+    = 서버가 답변 본문을 고치지 않는다. 임시 답변 토큰은 마지막 search 앞에만 있다.
+    """
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    graph, _ = _graph([AIMessage("근거 없는 임시 답변"), AIMessage("검색 결과 기반 답변")],
+                      client=FakeClient([_chunk()]), checkpointer=InMemorySaver())
+    client = TestClient(create_app(graph, settings))
+
+    frames = _frames(client.post("/v1/chat/stream",
+                                 json={"thread_id": "tok", "message": "질문"}))
+    last_search = max(i for i, (name, _) in enumerate(frames) if name == "search")
+    after = "".join(data for name, data in frames[last_search:] if name == "token")
+    before = "".join(data for name, data in frames[:last_search] if name == "token")
+
+    stored = graph.get_state({"configurable": {"thread_id": "tok"}}).values["messages"][-1].content
+    assert after == stored == "검색 결과 기반 답변"
+    assert before == "근거 없는 임시 답변"         # 버려지는 임시 답변은 마지막 search 앞에만 있다

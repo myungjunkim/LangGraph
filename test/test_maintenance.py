@@ -42,6 +42,19 @@ def _seed(db, conversations):
 
 
 
+class _AnyText:
+    """실행 시점마다 달라지는 값(현재 시각 등)을 비교에서 흡수하는 자리표시자."""
+
+    def __eq__(self, other):
+        return isinstance(other, str)
+
+    def __repr__(self):
+        return "<any text>"
+
+
+ANY_TEXT = _AnyText()
+
+
 def _turn(thread_id, index, question):
     """agent-16 이후 한 턴이 남기는 메시지 내용.
 
@@ -50,7 +63,7 @@ def _turn(thread_id, index, question):
     """
     from src.tools import NO_RESULT_TEXT
 
-    return [question, "", NO_RESULT_TEXT, NO_RESULT_TEXT, f"{thread_id} 답변 {index}"]
+    return [question, "", ANY_TEXT, NO_RESULT_TEXT, NO_RESULT_TEXT, f"{thread_id} 답변 {index}"]
 
 
 # --- M1. 열거 ---
@@ -64,8 +77,8 @@ def test_collect_threads_reads_every_conversation(tmp_path):
 
     by_id = {t.thread_id: t for t in threads}
     assert set(by_id) == {"a", "b"}
-    assert by_id["a"].message_count == 10         # 2턴 × (질문·tool_calls·검색2·답변)
-    assert by_id["b"].message_count == 5
+    assert by_id["a"].message_count == 12         # 2턴 × (질문·tool_calls·시스템정보·검색2·답변)
+    assert by_id["b"].message_count == 6
     assert by_id["a"].first_question == "A 첫 질문"
     assert by_id["b"].first_question == "B 첫 질문"
     assert all(t.last_active.tzinfo is not None for t in threads)

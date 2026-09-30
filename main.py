@@ -8,7 +8,8 @@ import uuid
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 
-from src.agent import API_TOOL_NAME, RUNTIME_ERRORS, build_default_graph, tool_call_summary
+from src.agent import (API_TOOL_NAME, RUNTIME_ERRORS, SYSTEM_FACTS_TOOL, build_default_graph,
+                       tool_call_summary)
 from src.checkpointer import sqlite_saver
 from src.config.settings import Settings, config_path_for, load_settings
 
@@ -27,6 +28,11 @@ def run_turn(graph, config: dict, text: str, out=print) -> None:
             continue
         if message.tool_calls:
             for call in message.tool_calls:
+                if call["name"] == SYSTEM_FACTS_TOOL:
+                    # 검색이 아니라 시스템이 넣은 사실이라 표시하지 않는다.
+                    # values 스트림에서는 강제 검색이 tool_calls 와 ToolMessage 를 한 번에 넣어
+                    # 마지막 메시지가 ToolMessage 가 되므로 이 분기는 실제로 도달하지 않는다(방어용)
+                    continue
                 label = "[호출]" if call["name"] == API_TOOL_NAME else "[검색]"
                 out(f"{label} {call['name']}({tool_call_summary(call['args'])})")
         else:

@@ -6,7 +6,7 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from src.agent import HINT_PREFIX, REWRITE_PROMPT, SYSTEM_PROMPT, build_graph, current_time_line
+from src.agent import REWRITE_PROMPT, SYSTEM_PROMPT, build_graph, current_time_line
 from src.tools import build_tools, format_chunks
 from test.conftest import FakeClient
 
@@ -32,14 +32,27 @@ def _chunk(title="메시지 등록", url="https://x/2", source="openapi", conten
     return {"chunk_id": "2#0", "title": title, "url": url, "source": source, "content": content, "metadata": {}}
 
 
+class _AnyText:
+    """실행 시점마다 달라지는 값(현재 시각 등)을 비교에서 흡수하는 자리표시자."""
+
+    def __eq__(self, other):
+        return isinstance(other, str)
+
+    def __repr__(self):
+        return "<any text>"
+
+
+ANY_TEXT = _AnyText()
+
+
 def _turn(question, answer):
     """agent-16 이후 한 턴이 남기는 메시지 내용(도구 결과 없이 답하려 한 경우).
 
     강제 검색 직전의 임시 답변은 상태에서 지워지므로
-    [질문, 합성 tool_calls(빈 content), 검색 결과×2, 최종 답변] 만 남는다.
+    [질문, 합성 tool_calls(빈 content), 시스템 정보, 검색 결과×2, 최종 답변] 만 남는다.
     """
     chunk = format_chunks([_chunk()])
-    return [question, "", chunk, chunk, answer]
+    return [question, "", ANY_TEXT, chunk, chunk, answer]
 
 
 def _graph(responses, client=None, checkpointer=None):
@@ -90,7 +103,7 @@ def test_groundless_answer_goes_through_a_forced_search(monkeypatch):
 
     # 근거 없는 임시 답변은 상태에서 지워지고 합성 tool_calls·검색 결과·최종 답변만 남는다
     assert [type(m).__name__ for m in state["messages"]] == [
-        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "AIMessage"]
+        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "ToolMessage", "AIMessage"]
     assert [c[1] for c in client.calls] == ["confluence", "openapi"]      # 검색 도구 2종을 직접 호출
     assert len(model.received) == 2                                      # 강제 후 한 번 더 답한다
     assert state["messages"][-1].content == "검색 결과를 반영한 답변"
@@ -125,9 +138,10 @@ def test_checkpointer_keeps_previous_turn():
 
     contents = [m.content for m in state["messages"]]
     assert contents == _turn("첫 질문", "첫 답변") + _turn("두 번째 질문", "두 번째 답변")
-    # 두 번째 턴의 agent 호출(received[3]) 에 이전 대화가 함께 전달됐다
+    # 두 번째 턴의 agent 호출(received[3]) 에 이전 대화가 함께 전달됐다.
+    # 마지막 질문만 독립 질문으로 치환된다(F1) — 상태의 원문은 위에서 확인했다
     assert [m.content for m in model.received[3]][1:] == (
-        _turn("첫 질문", "첫 답변") + ["두 번째 질문"])
+        _turn("첫 질문", "첫 답변") + ["독립 질문"])
 
 
 def test_different_thread_id_does_not_share_history():
@@ -252,8 +266,8 @@ def test_first_turn_skips_rewrite():
     assert state["standalone_question"] == ""
 
 
-def test_followup_turn_rewrites_and_passes_hint_to_agent():
-    """R2. 후속 턴: rewrite 가 먼저 호출되고 그 결과가 agent SystemMessage 에 힌트로 붙는다."""
+def test_followup_turn_rewrites_and_substitutes_the_question():
+    """R2. 후속 턴: rewrite 가 먼저 호출되고, 그 결과가 모델 입력의 마지막 질문을 대신한다(agent-16 F1)."""
     client = FakeClient([_chunk()])
     graph, model = _graph([
         _tool_call_message(query="메시지 등록 API"),           # 1턴 agent (도구 호출)
@@ -276,19 +290,22 @@ def test_followup_turn_rewrites_and_passes_hint_to_agent():
 
     agent_system = model.received[3][0]
     assert SYSTEM_PROMPT in agent_system.content
-    assert HINT_PREFIX + "메시지 등록 API의 v1과 v2 차이" in agent_system.content
+    # agent-16 F1: 힌트 블록 대신 모델이 받는 마지막 질문을 독립 질문으로 치환한다
+    assert "독립 표현" not in agent_system.content
+    assert model.received[3][-1].content == "메시지 등록 API의 v1과 v2 차이"
 
     assert state["standalone_question"] == "메시지 등록 API의 v1과 v2 차이"
     # 리라이팅 결과와 SystemMessage 는 대화 기록에 저장되지 않는다
     assert [type(m).__name__ for m in state["messages"]] == [
         "HumanMessage", "AIMessage", "ToolMessage", "AIMessage",          # 1턴(모델이 스스로 검색)
-        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "AIMessage"]  # 2턴(강제 검색)
+        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "ToolMessage",
+        "AIMessage"]                                                      # 2턴(강제 검색 + 시스템 정보)
     assert not any(isinstance(m, SystemMessage) for m in state["messages"])
     assert all("메시지 등록 API의 v1과 v2 차이" != m.content for m in state["messages"])
 
 
-def test_empty_rewrite_leaves_no_hint_and_does_not_reuse_previous_turn():
-    """R3. rewrite 가 빈 문자열이면 힌트를 붙이지 않고, 앞 턴의 힌트도 남지 않는다."""
+def test_empty_rewrite_keeps_the_question_and_does_not_reuse_previous_turn():
+    """R3. rewrite 가 빈 문자열이면 치환하지 않고, 앞 턴의 독립 질문이 다음 턴에 재사용되지도 않는다."""
     graph, model = _graph([
         AIMessage("1턴 임시"), AIMessage("1턴 답변"),          # 1턴 agent (강제 검색 전·후)
         AIMessage("2턴 독립 질문"),                            # 2턴 rewrite
@@ -301,9 +318,10 @@ def test_empty_rewrite_leaves_no_hint_and_does_not_reuse_previous_turn():
     graph.invoke({"messages": [HumanMessage("둘째 질문")]}, config=_thread())
     state = graph.invoke({"messages": [HumanMessage("셋째 질문")]}, config=_thread())
 
-    assert HINT_PREFIX in model.received[3][0].content        # 2턴 agent 에는 힌트가 있었다
+    assert model.received[3][-1].content == "2턴 독립 질문"   # 2턴 모델 입력은 치환됐다
     assert state["standalone_question"] == ""
-    assert HINT_PREFIX not in model.received[6][0].content    # 3턴 agent 에는 힌트 없음
+    # 3턴 rewrite 가 공백만 돌려줬으므로 치환 없이 원문이 그대로 간다
+    assert model.received[6][-1].content == "셋째 질문"
     assert SYSTEM_PROMPT in model.received[6][0].content
 
 
@@ -351,8 +369,8 @@ def test_rewrite_uses_the_model_without_tools_bound():
     assert model.received[2][0].content == REWRITE_PROMPT    # rewrite 는 여전히 원본 모델
 
 
-def test_agent_receives_original_question_text_not_the_rewritten_one():
-    """힌트는 SystemMessage 로만 전달되고, 모델이 받는 마지막 HumanMessage 는 원문 그대로다(F1 은 범위 제외)."""
+def test_agent_receives_the_rewritten_question_while_state_keeps_the_original():
+    """agent-16 F1: 모델 입력의 마지막 질문만 독립 질문으로 바뀌고, 상태에는 원문이 남는다."""
     graph, model = _graph([
         AIMessage("1턴 임시"), AIMessage("1턴 답변"),
         AIMessage("메시지 등록 API의 v1과 v2 차이"),   # 2턴 rewrite
@@ -363,19 +381,19 @@ def test_agent_receives_original_question_text_not_the_rewritten_one():
     graph.invoke({"messages": [HumanMessage("방금 알려준 API의 v1이랑 v2 차이는?")]}, config=_thread("orig"))
 
     agent_input = model.received[3]
-    assert agent_input[-1].content == "방금 알려준 API의 v1이랑 v2 차이는?"
     assert isinstance(agent_input[-1], HumanMessage)
+    assert agent_input[-1].content == "메시지 등록 API의 v1과 v2 차이"        # 모델이 받는 질문
     assert [m.content for m in agent_input if isinstance(m, HumanMessage)] == [
-        "메시지 등록 API 알려줘", "방금 알려준 API의 v1이랑 v2 차이는?"]
-    # 힌트 문장은 설계 문구 그대로 SystemMessage 에만 한 번 붙는다
-    assert agent_input[0].content.count(HINT_PREFIX) == 1
-    assert (HINT_PREFIX + "메시지 등록 API의 v1과 v2 차이"
-            + "\n검색이 필요할 때 query 는 이 독립 표현을 기준으로 만듭니다."
-            + " 앞 대화의 답변만으로 충분하면 검색하지 않아도 됩니다.") in agent_input[0].content
+        "메시지 등록 API 알려줘", "메시지 등록 API의 v1과 v2 차이"]           # 앞 턴 질문은 그대로
+
+    state = graph.get_state(_thread("orig")).values
+    questions = [m.content for m in state["messages"] if isinstance(m, HumanMessage)]
+    assert questions == ["메시지 등록 API 알려줘", "방금 알려준 API의 v1이랑 v2 차이는?"]   # 상태는 원문
+    assert "독립 표현" not in agent_input[0].content                          # 힌트 블록은 없앴다
 
 
-def test_exactly_empty_rewrite_response_adds_no_hint():
-    """rewrite 응답이 빈 문자열이면 힌트 없이 기존 동작(SYSTEM_PROMPT 단독)을 유지한다."""
+def test_exactly_empty_rewrite_response_leaves_the_question_untouched():
+    """rewrite 응답이 빈 문자열이면 치환하지 않고 사용자 질문 원문을 그대로 넘긴다."""
     graph, model = _graph([
         AIMessage("1턴 임시"), AIMessage("1턴 답변"),
         AIMessage(""),          # 2턴 rewrite — 빈 응답
@@ -387,8 +405,8 @@ def test_exactly_empty_rewrite_response_adds_no_hint():
 
     assert state["standalone_question"] == ""
     assert SYSTEM_PROMPT in model.received[3][0].content
-    # agent-14 로 `== SYSTEM_PROMPT` 가 `in` 으로 완화되면서 빠진 "힌트 없음" 보장을 되살린다(Validator)
-    assert HINT_PREFIX not in model.received[3][0].content
+    assert model.received[3][-1].content == "둘째 질문"        # 치환 없음
+    assert "독립 표현" not in model.received[3][0].content     # 힌트 블록도 없다
 
 
 def test_build_graph_public_signature_is_unchanged():
@@ -465,8 +483,8 @@ def test_system_message_starts_with_time_then_prompt():
     assert content.index("현재 시각: ") < content.index(SYSTEM_PROMPT)
 
 
-def test_hint_stays_at_the_end_after_time_injection():
-    """순서: 시각 → SYSTEM_PROMPT → 힌트(agent-08)."""
+def test_system_message_is_only_time_then_prompt():
+    """시스템 메시지는 시각 + SYSTEM_PROMPT 뿐이다(agent-16 F1 으로 힌트 블록을 없앴다)."""
     graph, model = _graph([
         AIMessage("1턴 임시"), AIMessage("1턴 답변"),
         AIMessage("메시지 등록 API의 v1과 v2 차이"),      # 2턴 rewrite
@@ -477,8 +495,8 @@ def test_hint_stays_at_the_end_after_time_injection():
     graph.invoke({"messages": [HumanMessage("v1 이랑 v2 차이는?")]}, config=_thread("order"))
 
     content = model.received[3][0].content
-    assert content.index("현재 시각: ") < content.index(SYSTEM_PROMPT) < content.index(HINT_PREFIX)
-    assert content.rstrip().endswith("앞 대화의 답변만으로 충분하면 검색하지 않아도 됩니다.")
+    assert content.index("현재 시각: ") < content.index(SYSTEM_PROMPT)
+    assert content.rstrip().endswith(SYSTEM_PROMPT.rstrip())     # 시스템 메시지는 시각 + 프롬프트뿐
 
 
 # T3. 매 턴 갱신
@@ -488,7 +506,8 @@ def test_time_is_recomputed_every_turn(monkeypatch):
 
     turns = ["현재 시각: 2026-09-29 (화) 09:00 KST", "현재 시각: 2026-09-30 (수) 10:00 KST"]
     # 한 턴 안에서는 agent 가 두 번(강제 검색 전·후) 호출되므로 같은 값을 돌려준다
-    calls = iter([turns[0], turns[0], turns[1], turns[1]])
+    # 한 턴에서 current_time_line 은 agent 2회 + force_search 1회로 3번 불린다
+    calls = iter([turns[0], turns[0], turns[0], turns[1], turns[1], turns[1]])
     monkeypatch.setattr(agent_module, "current_time_line", lambda: next(calls))
 
     graph, model = _graph([AIMessage("1턴 임시"), AIMessage("1턴 답변"),
@@ -506,7 +525,8 @@ def test_time_is_recomputed_every_turn(monkeypatch):
 
 # T4. 상태 미오염
 
-def test_time_is_not_stored_in_conversation_state():
+def test_time_is_stored_only_as_a_system_facts_tool_result():
+    """SystemMessage 는 여전히 저장되지 않고, 시각이 남는 곳은 강제 검색의 system_facts 결과뿐이다."""
     graph, _ = _graph([AIMessage("1턴 임시"), AIMessage("1턴 답변"),
                        AIMessage("독립 질문"), AIMessage("2턴 임시"), AIMessage("2턴 답변")],
                       checkpointer=InMemorySaver())
@@ -515,9 +535,12 @@ def test_time_is_not_stored_in_conversation_state():
     state = graph.invoke({"messages": [HumanMessage("둘째 질문")]}, config=_thread("clean"))
 
     assert [type(m).__name__ for m in state["messages"]] == [
-        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "AIMessage"] * 2
+        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "ToolMessage", "AIMessage"] * 2
     assert not any(isinstance(m, SystemMessage) for m in state["messages"])
-    assert all("현재 시각:" not in str(m.content) for m in state["messages"])
+    # 시각이 담기는 곳은 강제 검색이 넣은 시스템 정보 도구 결과뿐이다(SystemMessage 는 여전히 미저장)
+    with_time = [m for m in state["messages"] if "현재 시각:" in str(m.content)]
+    assert all(isinstance(m, ToolMessage) and m.name == "system_facts" for m in with_time)
+    assert len(with_time) == 2                                   # 2턴 × 1건
 
 
 # T5. 프롬프트
@@ -534,10 +557,9 @@ def test_prompt_rules_are_unchanged_by_time_injection():
         in SYSTEM_PROMPT
 
 
-def test_rule_five_accepts_system_provided_facts():
-    """agent-16 BUG1: 강제 검색 결과가 무관해도 주입된 현재 시각은 근거로 인정해야 한다."""
-    assert "다만 위에 주어진 현재 시각처럼 시스템이 제공한 정보는 확실한 근거이므로" in SYSTEM_PROMPT
-    # 손대지 않기로 한 규칙들은 문구 그대로다
+def test_prompt_is_back_to_the_agent_13_wording():
+    """agent-16 (G): 프롬프트 노선을 포기했으므로 규칙 문구는 agent-13 상태 그대로다."""
+    assert "다만 위에 주어진 현재 시각처럼" not in SYSTEM_PROMPT        # 규칙 5 단서 철회
     assert "인사말이나 일반 상식 질문은 예외입니다." in SYSTEM_PROMPT                      # 규칙 1
     assert "앞 대화 없이도 이해되는 독립 검색어로 만듭니다." in SYSTEM_PROMPT               # 규칙 3
     assert "요청하지 않았는데 임의로 호출하지 않습니다." in SYSTEM_PROMPT                   # 규칙 4
@@ -656,7 +678,7 @@ def test_time_line_is_reinjected_once_on_the_tool_loop_agent_call():
     assert isinstance(after_tool, SystemMessage)
     assert after_tool.content.count("현재 시각: ") == 1
     assert after_tool.content.startswith("현재 시각: ")
-    assert after_tool.content.index(SYSTEM_PROMPT) < after_tool.content.index(HINT_PREFIX)
+    assert after_tool.content.rstrip().endswith(SYSTEM_PROMPT.rstrip())
 
 
 # --- agent-16: 검색 없이 답하지 않는다(강제 검색) ---
@@ -696,9 +718,9 @@ def test_forced_search_result_reaches_the_next_agent_call():
 
     second_call = model.received[1]
     tool_messages = [m for m in second_call if isinstance(m, ToolMessage)]
-    assert len(tool_messages) == 2
-    assert all(format_chunks([_chunk()]) == m.content for m in tool_messages)
-    assert [m.name for m in tool_messages] == ["search_confluence", "search_openapi"]
+    assert [m.name for m in tool_messages] == ["system_facts", "search_confluence", "search_openapi"]
+    assert "현재 시각: " in tool_messages[0].content              # 시스템이 아는 사실도 근거로 넣는다
+    assert all(format_chunks([_chunk()]) == m.content for m in tool_messages[1:])
 
 
 def test_forced_search_uses_the_standalone_question_when_available():
@@ -763,8 +785,8 @@ def test_forced_search_survives_a_failing_tool():
     state = graph.invoke({"messages": [HumanMessage("질문")]})
 
     tool_messages = [m for m in state["messages"] if isinstance(m, ToolMessage)]
-    assert len(tool_messages) == 2
-    assert all("검색에 실패했습니다" in m.content for m in tool_messages)
+    assert len(tool_messages) == 3                               # 시스템 정보 1 + 검색 2
+    assert all("검색에 실패했습니다" in m.content for m in tool_messages[1:])
     assert state["messages"][-1].content == "검색 실패를 설명하는 답변"
 
 
@@ -776,8 +798,8 @@ def test_forced_search_survives_a_malformed_rag_response():
     state = graph.invoke({"messages": [HumanMessage("질문")]})
 
     tool_messages = [m for m in state["messages"] if isinstance(m, ToolMessage)]
-    assert len(tool_messages) == 2
-    assert all("검색에 실패했습니다: KeyError" in m.content for m in tool_messages)
+    assert len(tool_messages) == 3                               # 시스템 정보 1 + 검색 2
+    assert all("검색에 실패했습니다: KeyError" in m.content for m in tool_messages[1:])
     assert state["messages"][-1].content == "검색 실패를 설명하는 답변"
 
 
@@ -806,9 +828,9 @@ def test_forced_search_removes_the_groundless_draft_from_state():
     contents = [m.content for m in state["messages"]]
     assert "근거 없는 임시 답변" not in contents
     assert contents[-1] == "검색 결과 기반 답변"
-    # 합성 tool_calls + 검색 결과 쌍은 그대로 남는다(모델이 근거를 다시 볼 수 있어야 한다)
+    # 합성 tool_calls + (시스템 정보·검색 결과) 쌍은 그대로 남는다(모델이 근거를 다시 볼 수 있어야 한다)
     assert [type(m).__name__ for m in state["messages"]] == [
-        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "AIMessage"]
+        "HumanMessage", "AIMessage", "ToolMessage", "ToolMessage", "ToolMessage", "AIMessage"]
 
 
 def test_only_one_answer_per_turn_survives_in_state():
@@ -860,3 +882,77 @@ def test_forced_search_stops_after_one_pass_even_without_search_tools():
     assert len(model.received) == 2                       # 강제 전·후 2회로 끝난다
     assert state["forced"] is True
     assert state["messages"][-1].content == "근거 없는 답변"
+
+
+# --- agent-16 F1: 모델 입력의 마지막 질문만 독립 질문으로 치환 ---
+
+def test_replace_last_question_only_touches_the_last_human_message():
+    from src.agent import replace_last_question
+
+    messages = [HumanMessage("첫 질문"), AIMessage("답변"), HumanMessage("둘째 질문")]
+    replaced = replace_last_question(messages, "독립 질문")
+
+    assert [m.content for m in replaced] == ["첫 질문", "답변", "독립 질문"]
+    assert [m.content for m in messages] == ["첫 질문", "답변", "둘째 질문"]   # 원본 불변
+    assert replaced[-1].id == messages[-1].id                               # id 는 유지한다
+
+
+def test_replace_last_question_is_a_no_op_without_a_standalone_question():
+    from src.agent import replace_last_question
+
+    messages = [HumanMessage("질문")]
+    assert [m.content for m in replace_last_question(messages, "")] == ["질문"]
+    assert [m.content for m in replace_last_question([], "독립")] == []
+
+
+def test_first_turn_sends_the_question_as_is():
+    """첫 턴은 rewrite 가 빈 문자열을 주므로 치환하지 않는다."""
+    graph, model = _graph([AIMessage("임시"), AIMessage("답변")], checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("메시지 등록 API 알려줘")]}, config=_thread("f1-first"))
+
+    assert model.received[0][-1].content == "메시지 등록 API 알려줘"
+
+
+def test_state_keeps_the_original_question_while_model_sees_the_rewritten_one():
+    """상태·체크포인터는 원문 그대로여서 UI·히스토리·CLI 가 바뀌지 않는다."""
+    graph, model = _graph([
+        AIMessage("1턴 임시"), AIMessage("1턴 답변"),
+        AIMessage("메시지 등록 API의 v1과 v2 차이"),      # 2턴 rewrite
+        AIMessage("2턴 임시"), AIMessage("2턴 답변"),
+    ], checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("메시지 등록 API 알려줘")]}, config=_thread("f1"))
+    state = graph.invoke({"messages": [HumanMessage("방금 알려준 API의 v1이랑 v2 차이는?")]},
+                         config=_thread("f1"))
+
+    questions = [m.content for m in state["messages"] if isinstance(m, HumanMessage)]
+    assert questions == ["메시지 등록 API 알려줘", "방금 알려준 API의 v1이랑 v2 차이는?"]
+    assert model.received[3][-1].content == "메시지 등록 API의 v1과 v2 차이"
+
+
+def test_hint_block_is_gone_from_the_system_message():
+    """치환으로 목적이 달성돼 agent-08 힌트 블록은 제거했다(프롬프트 길이 축소)."""
+    import src.agent as agent_module
+
+    assert not hasattr(agent_module, "HINT_PREFIX")
+    graph, model = _graph([AIMessage("임시"), AIMessage("답변")])
+    graph.invoke({"messages": [HumanMessage("질문")]})
+
+    system = model.received[0][0].content
+    assert "독립 표현" not in system
+    assert system.rstrip().endswith(SYSTEM_PROMPT.rstrip())
+
+
+def test_forced_search_injects_the_current_time_as_a_tool_result():
+    """agent-16 (G): 모델은 검색 결과 안의 정보만 근거로 치므로 시각도 도구 결과로 넣는다."""
+    graph, model = _graph([AIMessage("임시"), AIMessage("답변")])
+
+    state = graph.invoke({"messages": [HumanMessage("오늘 몇월 몇일이야?")]})
+
+    facts = [m for m in state["messages"] if isinstance(m, ToolMessage) and m.name == "system_facts"]
+    assert len(facts) == 1
+    assert "현재 시각: " in facts[0].content
+    assert current_time_line()[:14] in facts[0].content          # 같은 날짜가 들어간다
+    # 두 번째 agent 호출이 그 근거를 본다
+    assert any(isinstance(m, ToolMessage) and m.name == "system_facts" for m in model.received[1])

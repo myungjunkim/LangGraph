@@ -24,6 +24,7 @@ from src.tools import build_tools
 RUNTIME_ERRORS = (httpx.HTTPError, ollama.ResponseError, ConnectionError, GraphRecursionError)
 
 API_TOOL_NAME = "call_api"
+SYSTEM_FACTS_TOOL = "system_facts"     # 강제 검색이 함께 넣는 합성 도구 이름(현재 시각 등)
 WEEKDAYS = "월화수목금토일"
 
 
@@ -40,6 +41,21 @@ def current_time_line(now: datetime | None = None) -> str:
     if zone and zone[0] in "+-" and len(zone) == 5:
         zone = f"UTC{zone[:3]}:{zone[3:]}"
     return f"현재 시각: {moment:%Y-%m-%d} ({weekday}) {moment:%H:%M} {zone}"
+
+
+def replace_last_question(messages, standalone_question: str):
+    """모델 입력용 사본. 마지막 HumanMessage 만 독립 질문으로 바꾼다(원본은 건드리지 않는다).
+
+    독립 질문이 비어 있으면(첫 턴) 그대로 돌려준다.
+    """
+    if not standalone_question:
+        return list(messages)
+    replaced = list(messages)
+    for index in range(len(replaced) - 1, -1, -1):
+        if isinstance(replaced[index], HumanMessage):
+            replaced[index] = HumanMessage(content=standalone_question, id=replaced[index].id)
+            break
+    return replaced
 
 
 def turn_has_tool_results(messages) -> bool:
@@ -80,7 +96,6 @@ SYSTEM_PROMPT = """당신은 팀 내부 문서(Confluence)와 사내 API 명세(
    먼저 search_openapi 로 경로와 필수 파라미터를 확인한 뒤 호출합니다.
    요청하지 않았는데 임의로 호출하지 않습니다.
 5. 검색 결과에 없는 내용은 추측하지 않습니다. 근거를 찾지 못하면 "관련 내용을 문서에서 찾지 못했습니다." 라고 답합니다.
-   다만 위에 주어진 현재 시각처럼 시스템이 제공한 정보는 확실한 근거이므로 검색 결과와 무관하게 그대로 사용합니다.
 6. API 관련 답변에는 HTTP 메서드, 경로, 필수 파라미터/필드를 명시합니다.
 7. 답변 끝에 `출처:` 목록으로 사용한 문서의 제목과 url 을 적습니다.
 8. 한국어로 간결하게 답합니다."""
@@ -92,7 +107,6 @@ REWRITE_PROMPT = """다음은 사용자와 어시스턴트의 대화입니다. �
 3. 질문의 의도는 바꾸지 않습니다.
 4. 다시 쓴 질문 한 문장만 출력합니다. 설명·따옴표·접두어 없이."""
 
-HINT_PREFIX = "[이번 질문의 독립 표현] "
 
 
 class AgentState(MessagesState):
@@ -123,14 +137,12 @@ def build_graph(chat_model: BaseChatModel, tools: list[BaseTool],
         return {"standalone_question": response.content.strip(), "forced": False}
 
     def agent(state: AgentState) -> dict:
-        # SystemMessage 는 상태에 저장하지 않고 호출 때마다 앞에 붙인다.
-        # 현재 시각은 맨 앞(사실), agent-08 힌트는 맨 뒤 순서를 지킨다
+        # SystemMessage 는 상태에 저장하지 않고 호출 때마다 앞에 붙인다(시각은 맨 앞).
         system = f"{current_time_line()}\n\n{SYSTEM_PROMPT}"
-        if state.get("standalone_question"):
-            system += ("\n\n" + HINT_PREFIX + state["standalone_question"]
-                       + "\n검색이 필요할 때 query 는 이 독립 표현을 기준으로 만듭니다."
-                       + " 앞 대화의 답변만으로 충분하면 검색하지 않아도 됩니다.")
-        response = model_with_tools.invoke([SystemMessage(system)] + state["messages"])
+        # 모델에 넘기는 목록에서만 마지막 질문을 독립 질문으로 바꾼다(F1).
+        # 상태·체크포인터에는 원문이 그대로 남아 UI·히스토리·CLI 가 바뀌지 않는다
+        messages = replace_last_question(state["messages"], state.get("standalone_question", ""))
+        response = model_with_tools.invoke([SystemMessage(system)] + messages)
         return {"messages": [response]}
 
     def force_search(state: AgentState) -> dict:
@@ -144,7 +156,11 @@ def build_graph(chat_model: BaseChatModel, tools: list[BaseTool],
         # 근거 없이 나온 직전 답변은 대화 기록에 남기지 않는다(복원·요약 소비자가 두 답변을 보게 된다).
         # route_after_agent 로만 들어오므로 마지막 메시지는 tool_calls 없는 AIMessage 이고, id 는 add_messages 가 붙인다
         removals = [RemoveMessage(id=messages[-1].id)]
-        calls, results = [], []
+        # 모델은 "검색 결과 안에" 있는 정보만 근거로 인정한다. 시스템이 아는 사실(현재 시각)을
+        # 도구 결과로 함께 넣어 날짜 질문이 근거 부족으로 거절되지 않게 한다
+        calls = [{"name": SYSTEM_FACTS_TOOL, "args": {"query": query}, "id": "forced_facts"}]
+        results = [ToolMessage(content=f"### 시스템이 제공한 확실한 정보\n- {current_time_line()}",
+                               name=SYSTEM_FACTS_TOOL, tool_call_id="forced_facts")]
         for index, tool in enumerate(search_tools):
             call_id = f"forced_{index}"
             calls.append({"name": tool.name, "args": {"query": query}, "id": call_id})
