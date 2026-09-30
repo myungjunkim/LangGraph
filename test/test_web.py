@@ -136,13 +136,20 @@ def test_sse_data_is_json_encoded(settings):
 
 # --- W3. 스트림 변형 ---
 
-def test_stream_without_tool_call_has_no_search_event(settings):
-    client, _ = _app([AIMessage("안녕하세요.")], settings=settings)
+def test_groundless_answer_emits_forced_search_events(settings):
+    """agent-16: 모델이 도구를 부르지 않아도 강제 검색이 돌아 search 이벤트로 드러난다.
+
+    (agent-02 의 "tool_calls 없으면 search 이벤트도 없다" 계약을 이 티켓이 대체한다.)
+    """
+    client, _ = _app([AIMessage("근거 없는 임시 답변"), AIMessage("안녕하세요.")], settings=settings)
     frames = _frames(_post(client, "안녕"))
     names = [name for name, _ in frames]
-    assert "search" not in names
+    assert [d for n, d in frames if n == "search"] == [
+        {"tool": "search_confluence", "query": "안녕"},     # 첫 턴이라 사용자 질문 그대로
+        {"tool": "search_openapi", "query": "안녕"},
+    ]
     assert names[-1] == "done"
-    assert "".join(d for n, d in frames if n == "token") == "안녕하세요."
+    assert "".join(d for n, d in frames if n == "token") == "근거 없는 임시 답변안녕하세요."
 
 
 def test_parallel_tool_calls_emit_two_search_events_in_order(settings):
@@ -223,27 +230,30 @@ def test_llm_failure_emits_error_frame_last(settings):
 def test_same_thread_id_keeps_history(settings):
     from langgraph.checkpoint.memory import InMemorySaver
 
-    client, model = _app([AIMessage("첫 답변"), AIMessage("두 번째 답변")],
+    client, model = _app([AIMessage("첫 임시"), AIMessage("첫 답변"),
+                          AIMessage("독립 질문"), AIMessage("둘째 임시"), AIMessage("두 번째 답변")],
                          checkpointer=InMemorySaver(), settings=settings)
 
     _post(client, "첫 질문", thread_id="same")
     _post(client, "두 번째 질문", thread_id="same")
 
     contents = [m.content for m in model.received[-1] if isinstance(m, (HumanMessage, AIMessage))]
-    assert contents == ["첫 질문", "첫 답변", "두 번째 질문"]
+    # 임시 답변은 지워지고 합성 tool_calls(빈 content)와 최종 답변만 다음 턴에 전달된다
+    assert contents == ["첫 질문", "", "첫 답변", "두 번째 질문", ""]
 
 
 def test_different_thread_id_starts_fresh(settings):
     from langgraph.checkpoint.memory import InMemorySaver
 
-    client, model = _app([AIMessage("첫 답변"), AIMessage("두 번째 답변")],
+    client, model = _app([AIMessage("첫 임시"), AIMessage("첫 답변"),
+                          AIMessage("둘째 임시"), AIMessage("두 번째 답변")],
                          checkpointer=InMemorySaver(), settings=settings)
 
     _post(client, "첫 질문", thread_id="a")
     _post(client, "두 번째 질문", thread_id="b")
 
     contents = [m.content for m in model.received[-1] if isinstance(m, (HumanMessage, AIMessage))]
-    assert contents == ["두 번째 질문"]
+    assert contents == ["두 번째 질문", ""]                  # 다른 스레드의 1턴은 섞이지 않는다
 
 
 # --- W5. 검증 실패 / 라우트 목록 ---
@@ -363,7 +373,8 @@ def test_rewrite_output_is_not_streamed_as_token(settings):
         _tool_call_message(query="메시지 등록 API"),   # 1턴 agent (도구 호출)
         AIMessage("POST /v1/messages 입니다."),        # 1턴 agent (최종 답변)
         AIMessage(rewritten),                          # 2턴 rewrite
-        AIMessage(ANSWER),                             # 2턴 agent
+        AIMessage("근거 없는 임시 답변"),                # 2턴 agent — 도구 결과가 없어 강제 검색을 탄다
+        AIMessage(ANSWER),                             # 2턴 agent (강제 검색 후 최종 답변)
     ], checkpointer=InMemorySaver(), settings=settings)
 
     _post(client, "메시지 등록 API 알려줘", thread_id="same")
@@ -372,9 +383,13 @@ def test_rewrite_output_is_not_streamed_as_token(settings):
     names = [name for name, _ in frames]
     assert names[-1] == "done"
     tokens = "".join(data for name, data in frames if name == "token")
-    assert rewritten not in tokens
-    assert tokens == ANSWER
-    assert [data for name, data in frames if name == "search"] == []
+    assert rewritten not in tokens                     # rewrite 출력은 token 으로 새지 않는다
+    assert tokens == "근거 없는 임시 답변" + ANSWER
+    # agent-16: 강제 검색은 standalone_question 을 query 로 쓰고 search 이벤트로 드러난다
+    assert [data for name, data in frames if name == "search"] == [
+        {"tool": "search_confluence", "query": rewritten},
+        {"tool": "search_openapi", "query": rewritten},
+    ]
 
 
 def test_rewrite_turn_keeps_search_then_token_order(settings):
@@ -383,7 +398,8 @@ def test_rewrite_turn_keeps_search_then_token_order(settings):
 
     rewritten = "메시지 등록 API의 필수 필드"
     client, _ = _app([
-        AIMessage("1턴 답변"),                              # 1턴 agent
+        AIMessage("1턴 임시 답변"),                          # 1턴 agent (강제 검색을 탄다)
+        AIMessage("1턴 답변"),                              # 1턴 agent (최종 답변)
         AIMessage(rewritten),                               # 2턴 rewrite
         _tool_call_message(query=rewritten),                # 2턴 agent (도구 호출)
         AIMessage(ANSWER),                                  # 2턴 agent (최종 답변)
@@ -410,6 +426,7 @@ def test_thread_messages_returns_questions_and_answers(settings):
         _tool_call_message(query="메시지 등록 API"),   # 도구 호출 AIMessage — 제외 대상
         AIMessage("POST /v1/messages 입니다."),        # 1턴 답변
         AIMessage("독립 질문"),                        # 2턴 rewrite — 대화 기록에 없음
+        AIMessage("근거 없는 임시 답변"),                # 2턴 agent — 강제 검색을 타고 상태에서 지워진다
         AIMessage("v1 과 v2 는 …"),                    # 2턴 답변
     ], client=rag, checkpointer=InMemorySaver(), settings=settings)
 
@@ -418,12 +435,14 @@ def test_thread_messages_returns_questions_and_answers(settings):
 
     body = client.get("/v1/threads/keep/messages").json()
 
+    # agent-16 F1: 강제 검색 직전의 임시 답변은 복원되지 않는다(턴마다 답변 1개)
     assert body == {"messages": [
         {"role": "user", "content": "메시지 등록 API 알려줘"},
         {"role": "assistant", "content": "POST /v1/messages 입니다."},
         {"role": "user", "content": "v1 이랑 v2 차이는?"},
         {"role": "assistant", "content": "v1 과 v2 는 …"},
     ]}
+    assert [m["content"] for m in body["messages"]].count("근거 없는 임시 답변") == 0
 
 
 def test_thread_messages_of_unknown_thread_is_empty(settings):
@@ -502,3 +521,121 @@ def test_thread_messages_keeps_question_when_answer_is_missing():
                 ToolMessage(content="청크", name="search_openapi", tool_call_id="call_1")]
 
     assert [(m.role, m.content) for m in to_thread_messages(messages)] == [("user", "질문")]
+
+
+# --- agent-16 Part B: 출처 위조 경고 ---
+
+def _sources_chunk(url):
+    return {"chunk_id": "1#0", "title": "문서", "url": url, "source": "confluence",
+            "content": f"본문 {url}", "metadata": {}}
+
+
+def test_no_warning_when_every_url_comes_from_the_search_results(settings):
+    real = "https://ihunet.atlassian.net/wiki/pages/5331420830"
+    client, _ = _app([_tool_call_message(query="q"), AIMessage(f"답변\n출처: {real}")],
+                     client=FakeClient([_sources_chunk(real)]), settings=settings)
+
+    frames = _frames(_post(client))
+
+    assert [name for name, _ in frames if name == "warning"] == []
+    assert frames[-1][0] == "done"
+
+
+def test_warning_lists_only_the_urls_missing_from_the_search_results(settings):
+    real = "https://ihunet.atlassian.net/wiki/pages/5331420830"
+    fake = "https://confluence.kudos.com/display/TEAM/USERSTORE"
+    client, _ = _app([_tool_call_message(query="q"), AIMessage(f"답변\n출처: {real}\n- {fake}")],
+                     client=FakeClient([_sources_chunk(real)]), settings=settings)
+
+    frames = _frames(_post(client))
+
+    warnings = [data for name, data in frames if name == "warning"]
+    assert warnings == [{"kind": "unverified_source", "urls": [fake]}]
+
+
+def test_warning_comes_right_before_done(settings):
+    fake = "https://confluence.kudos.com/x"
+    client, _ = _app([_tool_call_message(query="q"), AIMessage(f"답변 {fake}")],
+                     client=FakeClient([_sources_chunk("https://real.example.com/a")]), settings=settings)
+
+    names = [name for name, _ in _frames(_post(client))]
+
+    assert names[-2:] == ["warning", "done"]
+
+
+def test_warning_does_not_change_the_answer_body(settings):
+    """서버는 본문을 고치지 않는다(표시만 한다)."""
+    fake = "https://confluence.kudos.com/x"
+    answer = f"답변입니다.\n출처: {fake}"
+    client, _ = _app([_tool_call_message(query="q"), AIMessage(answer)],
+                     client=FakeClient([_sources_chunk("https://real.example.com/a")]), settings=settings)
+
+    frames = _frames(_post(client))
+
+    assert "".join(data for name, data in frames if name == "token") == answer
+
+
+@pytest.mark.parametrize("answer_url, source_url", [
+    ("https://ihunet.atlassian.net/wiki/a/", "https://ihunet.atlassian.net/wiki/a"),   # 후행 슬래시
+    ("HTTPS://IHUNET.ATLASSIAN.NET/wiki/a", "https://ihunet.atlassian.net/wiki/a"),    # 스킴·호스트 대소문자
+    ("https://ihunet.atlassian.net/wiki/a.", "https://ihunet.atlassian.net/wiki/a"),   # 문장 끝 마침표
+])
+def test_url_comparison_absorbs_harmless_differences(settings, answer_url, source_url):
+    client, _ = _app([_tool_call_message(query="q"), AIMessage(f"답변 {answer_url}")],
+                     client=FakeClient([_sources_chunk(source_url)]), settings=settings)
+
+    assert [name for name, _ in _frames(_post(client)) if name == "warning"] == []
+
+
+def test_query_string_difference_is_reported(settings):
+    """쿼리스트링이 다르면 다른 문서일 수 있으므로 경고한다."""
+    client, _ = _app([_tool_call_message(query="q"),
+                      AIMessage("답변 https://x.example.com/a?page=2")],
+                     client=FakeClient([_sources_chunk("https://x.example.com/a?page=1")]), settings=settings)
+
+    warnings = [data for name, data in _frames(_post(client)) if name == "warning"]
+    assert warnings == [{"kind": "unverified_source", "urls": ["https://x.example.com/a?page=2"]}]
+
+
+def test_unverified_urls_unit():
+    from src.web.app import unverified_urls
+
+    assert unverified_urls("답변에 링크 없음", "출처 https://a.example.com/1") == []
+    assert unverified_urls("https://a.example.com/1 만 인용", "https://a.example.com/1") == []
+    assert unverified_urls("https://b.example.com/2", "https://a.example.com/1") == ["https://b.example.com/2"]
+    # 같은 가짜 URL 이 여러 번 나와도 한 번만 보고한다
+    assert unverified_urls("https://b.example.com/2 와 https://b.example.com/2", "") == \
+        ["https://b.example.com/2"]
+
+
+def test_unverified_urls_ignores_markdown_and_korean_right_after_the_url():
+    """인라인 코드·굵게·붙은 조사가 URL 에 섞여 실제 출처를 가짜로 오판하지 않는다."""
+    from src.web.app import unverified_urls
+
+    source = "출처 https://wiki.example.com/pages/123"
+    for answer in ["`https://wiki.example.com/pages/123`",
+                   "**https://wiki.example.com/pages/123**",
+                   "https://wiki.example.com/pages/123에서 확인하세요"]:
+        assert unverified_urls(answer, source) == [], answer
+
+
+# --- agent-16 B4 (Validator): 강제 검색 턴의 거짓 경고 ---
+
+def test_forced_search_draft_does_not_trigger_a_source_warning(settings):
+    """B4: 강제 검색으로 진짜 출처를 인용한 턴에는 warning 이 뜨지 않아야 한다.
+
+    실환경 A1 재현 — 버려지는 임시 답변의 가짜 URL 이 경고에 섞여 나온다
+    (화면 본문에는 없는 링크를 경고가 가리킨다). 또 임시 답변 끝의 URL 에 최종 답변 첫 글자가
+    이어 붙어 존재하지 않는 URL 이 만들어진다.
+    """
+    real = "https://ihunet.atlassian.net/wiki/spaces/KUDOS/pages/5331420830/userstore"
+    fake = "https://confluence.kudos.com/display/TEAM/USERSTORE"
+    client, _ = _app([AIMessage(f"근거 없는 임시 답변\n출처: {fake}"),
+                      AIMessage(f"검색 결과 기반 답변\n출처: {real}")],
+                     client=FakeClient([{"chunk_id": "1#0", "title": "문서", "url": real,
+                                         "source": "confluence", "content": f"본문 {real}",
+                                         "metadata": {}}]), settings=settings)
+
+    frames = _frames(_post(client, "userstore 설정을 변경하면 왜 롤링 재배포가 필요한가요?"))
+
+    assert [data for name, data in frames if name == "warning"] == []

@@ -16,7 +16,11 @@ EXIT_COMMANDS = ("exit", "quit")
 
 
 def run_turn(graph, config: dict, text: str, out=print) -> None:
-    """한 턴을 실행하며 도구 호출과 최종 답변을 출력한다."""
+    """한 턴을 실행하며 도구 호출을 실시간으로, 최종 답변은 끝에 한 번만 출력한다.
+
+    강제 검색(agent-16) 직전의 임시 답변까지 출력하면 답변이 두 번 보이므로 마지막 것만 낸다.
+    """
+    answer = None
     for state in graph.stream({"messages": [HumanMessage(text)]}, config=config, stream_mode="values"):
         message = state["messages"][-1]
         if not isinstance(message, AIMessage):
@@ -26,7 +30,9 @@ def run_turn(graph, config: dict, text: str, out=print) -> None:
                 label = "[호출]" if call["name"] == API_TOOL_NAME else "[검색]"
                 out(f"{label} {call['name']}({tool_call_summary(call['args'])})")
         else:
-            out(message.content)
+            answer = message.content
+    if answer is not None:
+        out(answer)
 
 
 def warn_if_rag_down(base_url: str, timeout: float, out=print) -> None:

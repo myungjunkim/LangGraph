@@ -48,7 +48,7 @@ def test_fetch_targets_are_relative_paths():
 def test_sse_event_names_match_server_contract():
     """서버가 보내는 이벤트 이름만 다루고, 알 수 없는 이름을 기대하지 않는다."""
     handled = set(re.findall(r"event\s*===\s*'([a-z]+)'", _script()))
-    server_events = {"search", "token", "done", "error"}
+    server_events = {"search", "token", "done", "error", "warning"}   # agent-16: 출처 경고
     assert handled <= server_events, f"서버 계약에 없는 이벤트 처리: {handled - server_events}"
     assert {"search", "token", "error"} <= handled
 
@@ -572,6 +572,7 @@ for (const events of scenarios) {
     html: serialize(body),
     err: body.classes.has('err'),
     search: kids.filter(c => c.className === 'search').map(c => c.textContent),
+    warn: kids.filter(c => c.className === 'warn').map(c => c.textContent),
   });
 }
 process.stdout.write(JSON.stringify(out));
@@ -1564,3 +1565,67 @@ def test_examples_toggle_and_click_actually_work():
 
     assert result["disabledOn"] == [True] * 4                          # 전송 중 잠금
     assert result["disabledOff"] == [False] * 4
+
+
+# agent-16 Part B. 출처 경고 표시 (본문은 건드리지 않는다)
+
+def test_warning_event_is_handled_in_the_stream_parser():
+    script = _script()
+    assert "event === 'warning'" in script
+    branch = script[script.index("else if (event === 'warning')"):script.index("else if (event === 'error')")]
+    assert "addSourceWarning(wrap, data)" in branch
+    assert "body" not in branch                 # 답변 본문을 고치지 않는다
+
+
+def test_source_warning_is_built_with_dom_api_only():
+    body = _function_body("addSourceWarning")
+    assert "createElement('div')" in body
+    assert "textContent" in body
+    assert "data.urls" in body
+    assert "검색 결과에 없는 링크" in body
+    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert forbidden not in body
+
+
+def test_source_warning_has_its_own_style():
+    style = _style()
+    assert re.search(r"\.warn\s*\{[^}]*background", style)
+    assert re.search(r"@media \(prefers-color-scheme: dark\)\s*\{\s*\.warn\s*\{", style)
+
+
+def test_warning_is_appended_to_the_answer_bubble_not_the_body():
+    """경고는 답변 말풍선 끝에 붙고 본문(.body) 안에 섞이지 않는다(복사·재렌더에 영향 없음)."""
+    body = _function_body("addSourceWarning")
+    assert "wrap.appendChild(line)" in body
+    assert "body.appendChild" not in body
+
+
+def test_ask_shows_the_source_warning_only_for_the_answer_that_got_one():
+    """B3(Validator): warning 이 온 답변에만 경고 줄이 붙고, 다음 질문에는 남지 않는다.
+
+    본문(.body)은 warning 과 무관하게 답변 그대로여야 한다(서버도 UI 도 본문을 고치지 않는다).
+    """
+    warned, clean = _run_ask([
+        [["search", _SEARCH_DATA], ["token", "답변입니다."],
+         ["warning", {"kind": "unverified_source", "urls": ["https://confluence.kudos.com/x"]}],
+         ["done", ""]],
+        [["search", _SEARCH_DATA], ["token", "두 번째 답변입니다."], ["done", ""]],
+    ])
+
+    assert warned["warn"] == ["⚠ 검색 결과에 없는 링크가 포함돼 있습니다: https://confluence.kudos.com/x"]
+    assert warned["text"] == "답변입니다."          # 본문은 그대로
+    assert clean["warn"] == []                      # 경고 없는 답변에는 표시하지 않는다
+    assert clean["text"] == "두 번째 답변입니다."
+
+
+def test_ask_lists_every_unverified_url_in_one_warning_line():
+    result = _run_ask([[
+        ["token", "답변"],
+        ["warning", {"kind": "unverified_source", "urls": ["https://a.example.com/1",
+                                                           "https://b.example.com/2"]}],
+        ["done", ""],
+    ]])[0]
+
+    assert result["warn"] == [
+        "⚠ 검색 결과에 없는 링크가 포함돼 있습니다: https://a.example.com/1, https://b.example.com/2"]
+    assert result["err"] is False

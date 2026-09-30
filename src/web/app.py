@@ -1,18 +1,22 @@
 """브라우저용 FastAPI 앱. 에이전트 한 턴을 SSE 로 흘려보낸다."""
 import json
+import re
 from typing import AsyncIterator
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import FastAPI, Path as PathParam
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.agent import RUNTIME_ERRORS, tool_call_summary
 from src.config.settings import PROJECT_ROOT, Settings
 from src.web.dto import ChatRequest, HealthResponse, ThreadMessage, ThreadMessagesResponse
 
 STATIC_DIR = PROJECT_ROOT / "resources" / "static"
+# 백틱·별표(마크다운)와 한글(붙은 조사)에서 URL 을 끊는다. 출처 쪽도 같은 규칙으로 잘려 비교가 일관된다
+URL_PATTERN = re.compile(r"""https?://[^\s)\]>"'`*ㄱ-ㆎ가-힣]+""")
 
 
 def _sse(event: str, data) -> str:
@@ -47,20 +51,51 @@ def to_thread_messages(messages) -> list[ThreadMessage]:
     return result
 
 
+def extract_urls(text: str) -> set[str]:
+    """비교용으로 정규화한 URL 집합. 후행 구두점·슬래시·대소문자(스킴+호스트) 차이를 흡수한다."""
+    urls = set()
+    for raw in URL_PATTERN.findall(text):
+        parts = urlsplit(raw.rstrip(".,;:!?\u201d\u2019\"'"))
+        urls.add(urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
+                             parts.path.rstrip("/"), parts.query, "")))
+    return urls
+
+
+def unverified_urls(answer: str, sources: str) -> list[str]:
+    """답변에는 있는데 이번 턴 검색 결과에는 없는 URL. 출처 위조를 사용자에게 알리기 위한 것이다."""
+    known = extract_urls(sources)
+    return sorted(url for url in extract_urls(answer) if url not in known)
+
+
 async def stream_events(graph, config: dict, text: str) -> AsyncIterator[tuple[str, object]]:
     """그래프 한 턴을 (event, data) 로 흘린다. RUNTIME_ERRORS 는 호출자가 잡는다."""
+    sources, answer = [], []          # 이번 턴 도구 결과 원문 / 흘려보낸 답변 토큰
     async for mode, payload in graph.astream({"messages": [HumanMessage(text)]}, config=config,
                                              stream_mode=["updates", "messages"]):
         if mode == "updates":
-            for message in payload.get("agent", {}).get("messages", []):
-                for call in getattr(message, "tool_calls", None) or []:
-                    yield "search", {"tool": call["name"], "query": tool_call_summary(call["args"])}
+            # agent 뿐 아니라 모든 노드 갱신을 본다. force_search 가 만든 합성 tool_calls 도
+            # 화면에 [검색] 줄로 드러나야 한다(tools 노드 갱신에는 tool_calls 가 없어 부작용 없음)
+            for node_update in payload.values():
+                for message in node_update.get("messages", []):
+                    if isinstance(message, ToolMessage):
+                        sources.append(str(message.content))
+                    for call in getattr(message, "tool_calls", None) or []:
+                        # UI 와 같은 규칙: 도구 호출 직전까지의 본문(강제 검색이 버릴 임시 답변 포함)은
+                        # 최종 답변이 아니므로 누적에서 지운다. 안 그러면 출처 대조가 거짓 경고를 낸다
+                        answer.clear()
+                        yield "search", {"tool": call["name"], "query": tool_call_summary(call["args"])}
         elif mode == "messages":
             # ChatOllama 는 AIMessageChunk 를, 가짜 모델은 완성된 AIMessage 를 흘린다(AIMessageChunk 는 하위 타입).
             # tool_call 만 있는 조각은 content 가 비어 있어 걸러진다.
             chunk, meta = payload
             if meta.get("langgraph_node") == "agent" and isinstance(chunk, AIMessage) and chunk.content:
+                answer.append(str(chunk.content))
                 yield "token", chunk.content
+
+    # 답변이 인용한 URL 이 이번 턴 검색 결과에 없으면 알린다(본문은 고치지 않고 표시만 한다)
+    unverified = unverified_urls("".join(answer), "\n".join(sources))
+    if unverified:
+        yield "warning", {"kind": "unverified_source", "urls": unverified}
     yield "done", ""
 
 

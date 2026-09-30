@@ -31,12 +31,26 @@ def _seed(db, conversations):
             for i, _ in enumerate(questions):
                 if i:
                     responses.append(AIMessage("독립 질문"))      # 후속 턴의 rewrite 응답
+                # agent-16: 도구 결과 없이 답하려 하면 강제 검색을 거쳐 한 번 더 답한다
+                responses.append(AIMessage(f"{thread_id} 임시 답변 {i + 1}"))
                 responses.append(AIMessage(f"{thread_id} 답변 {i + 1}"))
             model = ScriptedChatModel(responses=responses, received=[])
             graph = build_graph(model, build_tools(FakeClient([]), 6), saver)
             for question in questions:
                 graph.invoke({"messages": [HumanMessage(question)]},
                              config={"configurable": {"thread_id": thread_id}})
+
+
+
+def _turn(thread_id, index, question):
+    """agent-16 이후 한 턴이 남기는 메시지 내용.
+
+    강제 검색 직전의 임시 답변은 상태에서 지워지므로
+    [질문, 합성 tool_calls(빈 content), 검색 결과×2, 최종 답변] 만 남는다.
+    """
+    from src.tools import NO_RESULT_TEXT
+
+    return [question, "", NO_RESULT_TEXT, NO_RESULT_TEXT, f"{thread_id} 답변 {index}"]
 
 
 # --- M1. 열거 ---
@@ -50,8 +64,8 @@ def test_collect_threads_reads_every_conversation(tmp_path):
 
     by_id = {t.thread_id: t for t in threads}
     assert set(by_id) == {"a", "b"}
-    assert by_id["a"].message_count == 4          # 질문2 + 답변2
-    assert by_id["b"].message_count == 2
+    assert by_id["a"].message_count == 10         # 2턴 × (질문·tool_calls·검색2·답변)
+    assert by_id["b"].message_count == 5
     assert by_id["a"].first_question == "A 첫 질문"
     assert by_id["b"].first_question == "B 첫 질문"
     assert all(t.last_active.tzinfo is not None for t in threads)
@@ -233,8 +247,8 @@ def test_default_mode_lists_without_deleting(tmp_path, write_config):
     with sqlite_saver(db) as saver:
         assert len(collect_threads(saver)) == 3
     # 대화 내용이 손상되지 않았다
-    assert _messages(db, "a") == ["A 질문", "a 답변 1"]
-    assert _messages(db, "c") == ["C 질문", "c 답변 1"]
+    assert _messages(db, "a") == _turn("a", 1, "A 질문")
+    assert _messages(db, "c") == _turn("c", 1, "C 질문")
 
 
 def test_apply_deletes_only_expired(tmp_path, write_config, monkeypatch):
@@ -253,7 +267,7 @@ def test_apply_deletes_only_expired(tmp_path, write_config, monkeypatch):
     assert "삭제 완료: 1개 대화 (남은 대화 1개)" in "\n".join(out)
     with sqlite_saver(db) as saver:
         assert [t.thread_id for t in collect_threads(saver)] == ["최근"]
-    assert _messages(db, "최근") == ["새 질문", "최근 답변 1"]     # 남은 대화는 그대로 읽힌다
+    assert _messages(db, "최근") == _turn("최근", 1, "새 질문")   # 남은 대화는 그대로 읽힌다
     assert _messages(db, "오래된") == []
 
 
@@ -266,7 +280,7 @@ def test_apply_with_nothing_to_delete(tmp_path, write_config):
     assert _run(settings, out, apply=True, older_than_days=365) == 0
 
     assert "삭제 완료: 0개 대화 (남은 대화 1개)" in "\n".join(out)
-    assert _messages(db, "a") == ["질문", "a 답변 1"]
+    assert _messages(db, "a") == _turn("a", 1, "질문")
 
 
 def test_missing_db_file_is_not_an_error(tmp_path, write_config):
@@ -437,7 +451,7 @@ def test_entrypoint_deletes_one_second_past_the_threshold(tmp_path, write_config
     kept = []
     assert _run(settings, kept, apply=True, older_than_days=14) == 0
     assert "삭제 완료: 0개 대화 (남은 대화 1개)" in "\n".join(kept)
-    assert _messages(db, "경계") == ["경계 질문", "경계 답변 1"]
+    assert _messages(db, "경계") == _turn("경계", 1, "경계 질문")
 
     _freeze_now(monkeypatch, last_active + timedelta(days=14, seconds=1))
     gone = []
@@ -459,8 +473,8 @@ def test_default_mode_leaves_db_bytes_untouched(tmp_path, write_config, monkeypa
     assert _run(settings, [], older_than_days=0) == 0
 
     assert db.read_bytes() == before
-    assert _messages(db, "a") == ["A 질문", "a 답변 1"]
-    assert _messages(db, "b") == ["B 질문", "b 답변 1"]
+    assert _messages(db, "a") == _turn("a", 1, "A 질문")
+    assert _messages(db, "b") == _turn("b", 1, "B 질문")
 
     assert _run(settings, [], apply=True, older_than_days=0) == 0       # 민감도 대조군
     assert db.read_bytes() != before
@@ -517,4 +531,4 @@ def test_main_returns_0_and_never_applies_without_the_flag(tmp_path, write_confi
     assert maintenance.main() == 0
 
     assert db.read_bytes() == before
-    assert _messages(db, "a") == ["A 질문", "a 답변 1"]
+    assert _messages(db, "a") == _turn("a", 1, "A 질문")

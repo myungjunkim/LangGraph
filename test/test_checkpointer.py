@@ -12,6 +12,17 @@ from test.test_agent import ScriptedChatModel
 CONFIG = {"configurable": {"thread_id": "t1"}}
 
 
+def _turn(question, answer):
+    """agent-16 이후 한 턴이 남기는 메시지 내용.
+
+    강제 검색 직전의 임시 답변은 상태에서 지워지므로
+    [질문, 합성 tool_calls(빈 content), 검색 결과×2, 최종 답변] 만 남는다.
+    """
+    from src.tools import NO_RESULT_TEXT
+
+    return [question, "", NO_RESULT_TEXT, NO_RESULT_TEXT, answer]
+
+
 def _graph_with(saver, responses):
     model = ScriptedChatModel(responses=responses, received=[])
     return build_graph(model, build_tools(FakeClient([]), 6), saver), model
@@ -23,19 +34,22 @@ def test_conversation_survives_new_saver_instance(tmp_path):
     db = tmp_path / "sub" / "checkpoints.sqlite"
 
     with sqlite_saver(db) as saver:                       # 1번째 프로세스
-        graph, _ = _graph_with(saver, [AIMessage("첫 답변")])
+        graph, _ = _graph_with(saver, [AIMessage("첫 임시 답변"), AIMessage("첫 답변")])
         graph.invoke({"messages": [HumanMessage("첫 질문")]}, config=CONFIG)
 
     with sqlite_saver(db) as saver:                       # 2번째 프로세스(새 인스턴스, 같은 파일)
-        graph, model = _graph_with(saver, [AIMessage("독립 질문"), AIMessage("두 번째 답변")])
+        graph, model = _graph_with(saver, [AIMessage("독립 질문"), AIMessage("둘째 임시 답변"),
+                                           AIMessage("두 번째 답변")])
         state = graph.get_state(CONFIG)
-        assert [m.content for m in state.values["messages"]] == ["첫 질문", "첫 답변"]
+        assert [m.content for m in state.values["messages"]] == _turn("첫 질문", "첫 답변")
 
         state = graph.invoke({"messages": [HumanMessage("두 번째 질문")]}, config=CONFIG)
 
-    assert [m.content for m in state["messages"]] == ["첫 질문", "첫 답변", "두 번째 질문", "두 번째 답변"]
+    assert [m.content for m in state["messages"]] == (
+        _turn("첫 질문", "첫 답변") + _turn("두 번째 질문", "두 번째 답변"))
     # 2턴째 agent 호출(rewrite 다음)에 1턴 대화가 함께 전달됐다
-    assert [m.content for m in model.received[1]][1:] == ["첫 질문", "첫 답변", "두 번째 질문"]
+    assert [m.content for m in model.received[1]][1:] == (
+        _turn("첫 질문", "첫 답변") + ["두 번째 질문"])
 
 
 def test_saver_creates_parent_directory(tmp_path):
@@ -48,16 +62,16 @@ def test_saver_creates_parent_directory(tmp_path):
 def test_threads_are_isolated_in_one_file(tmp_path):
     db = tmp_path / "checkpoints.sqlite"
     with sqlite_saver(db) as saver:
-        graph, _ = _graph_with(saver, [AIMessage("답")])
+        graph, _ = _graph_with(saver, [AIMessage("임시"), AIMessage("답")])
         graph.invoke({"messages": [HumanMessage("A 대화")]}, config={"configurable": {"thread_id": "a"}})
         graph.invoke({"messages": [HumanMessage("B 대화")]}, config={"configurable": {"thread_id": "b"}})
 
     with sqlite_saver(db) as saver:
-        graph, _ = _graph_with(saver, [AIMessage("답")])
+        graph, _ = _graph_with(saver, [AIMessage("임시"), AIMessage("답")])
         a = graph.get_state({"configurable": {"thread_id": "a"}}).values["messages"]
         b = graph.get_state({"configurable": {"thread_id": "b"}}).values["messages"]
-    assert [m.content for m in a] == ["A 대화", "답"]
-    assert [m.content for m in b] == ["B 대화", "답"]
+    assert [m.content for m in a] == _turn("A 대화", "답")
+    assert [m.content for m in b] == _turn("B 대화", "답")
 
 
 def test_unknown_thread_has_empty_state(tmp_path):
@@ -122,11 +136,12 @@ def test_web_conversation_survives_app_restart(tmp_path, write_config):
                 yield client, model
 
     async def scenario():
-        async with web_app([AIMessage("1턴 답변"), AIMessage("독립"), AIMessage("2턴 답변")]) as (client, _):
+        async with web_app([AIMessage("1턴 임시"), AIMessage("1턴 답변"),
+                            AIMessage("독립"), AIMessage("2턴 임시"), AIMessage("2턴 답변")]) as (client, _):
             assert (await _web_turn(client, "첫 질문")).status_code == 200      # 1번째 서버 프로세스
             assert (await _web_turn(client, "둘째 질문")).status_code == 200
 
-        async with web_app([AIMessage("독립"), AIMessage("3턴 답변")]) as (client, model):
+        async with web_app([AIMessage("독립"), AIMessage("3턴 임시"), AIMessage("3턴 답변")]) as (client, model):
             assert (await _web_turn(client, "셋째 질문")).status_code == 200    # 2번째 서버 프로세스
             history = (await client.get("/v1/threads/web-1/messages")).json()
         return model, history
@@ -134,8 +149,9 @@ def test_web_conversation_survives_app_restart(tmp_path, write_config):
     model, history = asyncio.run(scenario())
 
     # 3턴째 agent 호출에 이전 프로세스의 대화가 들어 있다
-    assert [m.content for m in model.received[1]][1:] == [
-        "첫 질문", "1턴 답변", "둘째 질문", "2턴 답변", "셋째 질문"]
+    assert [m.content for m in model.received[1]][1:] == (
+        _turn("첫 질문", "1턴 답변") + _turn("둘째 질문", "2턴 답변") + ["셋째 질문"])
+    # agent-16 F1: 강제 검색 직전의 임시 답변은 지워지므로 턴마다 답변이 하나씩만 복원된다
     assert history == {"messages": [
         {"role": "user", "content": "첫 질문"},
         {"role": "assistant", "content": "1턴 답변"},
@@ -166,10 +182,10 @@ def test_sqlite_saver_reopens_existing_file(tmp_path):
     """이미 있는 파일·디렉터리를 다시 열어도 오류 없이 기존 대화를 그대로 본다."""
     db = tmp_path / "db.sqlite"
     with sqlite_saver(db) as saver:
-        graph, _ = _graph_with(saver, [AIMessage("답")])
+        graph, _ = _graph_with(saver, [AIMessage("임시"), AIMessage("답")])
         graph.invoke({"messages": [HumanMessage("질문")]}, config=CONFIG)
 
     for _ in range(2):                                   # 세 번째 프로세스까지 재기동
         with sqlite_saver(db) as saver:
-            graph, _ = _graph_with(saver, [AIMessage("답")])
-            assert [m.content for m in graph.get_state(CONFIG).values["messages"]] == ["질문", "답"]
+            graph, _ = _graph_with(saver, [AIMessage("임시"), AIMessage("답")])
+            assert [m.content for m in graph.get_state(CONFIG).values["messages"]] == _turn("질문", "답")

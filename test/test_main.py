@@ -80,12 +80,14 @@ def test_run_turn_output_is_unchanged_on_followup_turn():
 
     rewritten = "메시지 등록 API의 v1과 v2 차이"
     graph, _ = _graph([
-        AIMessage("POST /v1/messages 입니다."),      # 1턴 agent
+        AIMessage("근거 없는 임시 답변"),              # 1턴 agent — 도구 결과가 없어 강제 검색을 탄다
+        AIMessage("POST /v1/messages 입니다."),      # 1턴 agent (강제 검색 후 최종 답변)
         AIMessage(rewritten),                        # 2턴 rewrite
         _tool_call_message(query=rewritten),         # 2턴 agent (도구 호출)
         AIMessage("v1 과 v2 차이는 …"),               # 2턴 agent (최종 답변)
     ], checkpointer=InMemorySaver())
 
+    # agent-16 F2: 강제 검색 직전의 임시 답변은 출력하지 않고 최종 답변만 한 번 낸다
     assert _collect(graph, "메시지 등록 API 알려줘") == ["POST /v1/messages 입니다."]
     assert _collect(graph, "방금 알려준 API의 v1이랑 v2 차이는?") == [
         f"[검색] search_openapi({rewritten})",
@@ -167,3 +169,25 @@ def test_main_opens_sqlite_saver_at_configured_path_and_injects_it(monkeypatch, 
     assert opened["graph"] == ("GRAPH", "SAVER")
     assert opened["config"]["configurable"]["thread_id"] == "cli-1"
     assert printed == ["대화 ID: cli-1 (이어서 하려면 --thread cli-1)"]
+
+
+def test_run_turn_prints_the_answer_only_once_when_search_is_forced():
+    """agent-16 F2: 강제 검색 직전의 임시 답변은 출력하지 않는다(답변 1개)."""
+    graph, _ = _graph([AIMessage("근거 없는 임시 답변"), AIMessage("검색 결과 기반 답변")])
+
+    lines = []
+    main.run_turn(graph, {"configurable": {"thread_id": "once"}}, "질문", out=lines.append)
+
+    assert lines.count("검색 결과 기반 답변") == 1
+    assert "근거 없는 임시 답변" not in lines
+    assert lines[-1] == "검색 결과 기반 답변"         # 답변은 맨 끝에 한 번
+
+
+def test_run_turn_still_shows_tool_calls_in_real_time():
+    """[검색] 줄은 예전처럼 도구 호출 시점에 그대로 나온다."""
+    graph, _ = _graph([_tool_call_message(query="메시지 등록"), AIMessage("답변")])
+
+    lines = []
+    main.run_turn(graph, {"configurable": {"thread_id": "rt"}}, "질문", out=lines.append)
+
+    assert lines == ["[검색] search_openapi(메시지 등록)", "답변"]

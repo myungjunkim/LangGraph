@@ -123,6 +123,9 @@
               color:var(--text); font-size:calc(var(--fs) * 0.8); cursor:pointer; }
   #tobottom.show { display:block; }
 
+  .warn { margin-top:8px; padding:8px 12px; border-radius:10px; font-size:calc(var(--fs) * 0.85);
+          background:#fff4e5; border:1px solid #f0c36d; color:#7a4e00; }
+  @media (prefers-color-scheme: dark) { .warn { background:#3a2f1b; border-color:#6b5320; color:#f0d9a8; } }
   .err { color:#cf222e; }
   @media (prefers-color-scheme: dark) { .err { color:#ff7b72; } }
 </style>
@@ -447,6 +450,14 @@ function decorateCodeBlocks(container, raw) {
   }
 }
 
+// 검색 결과에 없는 링크가 답변에 있으면 알린다. 본문은 고치지 않고 경고 줄만 덧붙인다
+function addSourceWarning(wrap, data) {
+  const line = document.createElement('div');
+  line.className = 'warn';
+  line.textContent = `\u26A0 검색 결과에 없는 링크가 포함돼 있습니다: ${data.urls.join(', ')}`;
+  wrap.appendChild(line);
+}
+
 // 답변이 끝났을 때: 커서 제거 → 코드블록 장식 → 답변 복사 버튼(원문 마크다운을 복사한다)
 function finishAnswer(wrap, body, raw) {
   body.classList.remove('streaming');
@@ -498,6 +509,7 @@ async function ask(message) {
         body.replaceChildren();
         addSearchLine(wrap, data);
       }
+      else if (event === 'warning') addSourceWarning(wrap, data);
       else if (event === 'error') { ended = true; finishAnswer(wrap, body, raw); body.classList.add('err'); body.appendChild(document.createTextNode(data)); }
       else if (event === 'done') { ended = true; finishAnswer(wrap, body, raw); }
     }
