@@ -69,7 +69,11 @@ def unverified_urls(answer: str, sources: str) -> list[str]:
 
 async def stream_events(graph, config: dict, text: str) -> AsyncIterator[tuple[str, object]]:
     """그래프 한 턴을 (event, data) 로 흘린다. RUNTIME_ERRORS 는 호출자가 잡는다."""
-    sources, answer = [], []          # 이번 턴 도구 결과 원문 / 흘려보낸 답변 토큰
+    sources, answer = [], []          # 이번 턴 도구 결과 원문 / 최종 답변으로 누적한 토큰
+    # 이번 턴에 도구 결과가 나오기 전의 답변 토큰은 강제 검색(agent-16)이 반드시 버린다.
+    # 버려질 임시 답변이 화면에 떴다 사라지지 않도록, 도구 결과를 볼 때까지 token 을 내보내지 않는다
+    has_tool_results = False
+    emitted = False
     async for mode, payload in graph.astream({"messages": [HumanMessage(text)]}, config=config,
                                              stream_mode=["updates", "messages"]):
         if mode == "updates":
@@ -79,12 +83,14 @@ async def stream_events(graph, config: dict, text: str) -> AsyncIterator[tuple[s
                 for message in node_update.get("messages", []):
                     if isinstance(message, ToolMessage):
                         sources.append(str(message.content))
+                        has_tool_results = True
                     for call in getattr(message, "tool_calls", None) or []:
+                        # UI 와 같은 규칙: 도구 호출 직전까지의 본문(강제 검색이 버릴 임시 답변 포함)은
+                        # 최종 답변이 아니므로 누적에서 지운다. 안 그러면 출처 대조가 거짓 경고를 낸다.
+                        # system_facts 도 같은 호출 묶음이라 표시 여부와 무관하게 먼저 비운다
+                        answer.clear()
                         if call["name"] == SYSTEM_FACTS_TOOL:
                             continue          # 검색이 아니라 시스템이 넣은 사실이라 표시하지 않는다
-                        # UI 와 같은 규칙: 도구 호출 직전까지의 본문(강제 검색이 버릴 임시 답변 포함)은
-                        # 최종 답변이 아니므로 누적에서 지운다. 안 그러면 출처 대조가 거짓 경고를 낸다
-                        answer.clear()
                         yield "search", {"tool": call["name"], "query": tool_call_summary(call["args"])}
         elif mode == "messages":
             # ChatOllama 는 AIMessageChunk 를, 가짜 모델은 완성된 AIMessage 를 흘린다(AIMessageChunk 는 하위 타입).
@@ -92,7 +98,13 @@ async def stream_events(graph, config: dict, text: str) -> AsyncIterator[tuple[s
             chunk, meta = payload
             if meta.get("langgraph_node") == "agent" and isinstance(chunk, AIMessage) and chunk.content:
                 answer.append(str(chunk.content))
-                yield "token", chunk.content
+                if has_tool_results:          # 근거가 생긴 뒤의 답변만 화면에 흘린다
+                    emitted = True
+                    yield "token", chunk.content
+
+    # 폴백: 보류만 하고 한 번도 내보내지 못했으면 답변이 통째로 사라진다. 끝에 한 번에 보낸다
+    if not emitted and answer:
+        yield "token", "".join(answer)
 
     # 답변이 인용한 URL 이 이번 턴 검색 결과에 없으면 알린다(본문은 고치지 않고 표시만 한다)
     unverified = unverified_urls("".join(answer), "\n".join(sources))

@@ -128,7 +128,8 @@ def test_stream_response_headers(settings):
 
 
 def test_sse_data_is_json_encoded(settings):
-    client, _ = _app([AIMessage("한글 답변")], settings=settings)
+    # 강제 검색 전 임시 답변은 보류되므로(agent-17) 최종 답변용 응답을 따로 둔다
+    client, _ = _app([AIMessage("임시 답변"), AIMessage("한글 답변")], settings=settings)
     res = _post(client)
     assert 'data: "한글 답변"' in res.text  # ensure_ascii=False
     assert res.text.endswith("\n\n")
@@ -149,7 +150,8 @@ def test_groundless_answer_emits_forced_search_events(settings):
         {"tool": "search_openapi", "query": "안녕"},
     ]
     assert names[-1] == "done"
-    assert "".join(d for n, d in frames if n == "token") == "근거 없는 임시 답변안녕하세요."
+    # agent-17: 버려질 임시 답변은 화면에 흐르지 않는다(최종 답변만 token 으로 나간다)
+    assert "".join(d for n, d in frames if n == "token") == "안녕하세요."
 
 
 def test_parallel_tool_calls_emit_two_search_events_in_order(settings):
@@ -168,8 +170,11 @@ def test_parallel_tool_calls_emit_two_search_events_in_order(settings):
     ]
 
 
-def test_text_before_tool_call_streams_before_search_event(settings):
-    """도구 호출 직전 멘트는 search 보다 먼저 흐른다. UI 는 search 에서 그때까지의 본문을 비운다."""
+def test_text_before_tool_call_is_not_streamed(settings):
+    """agent-17: 도구 호출 직전 멘트도 도구 결과 이전이라 보류된다(UI 가 지울 내용을 애초에 안 보낸다).
+
+    (agent-05 의 "멘트가 search 앞에 흐른다" 계약을 이 티켓이 대체한다.)
+    """
     preamble = AIMessage(content="문서를 먼저 검색해 볼게요.", tool_calls=[
         {"name": "search_openapi", "args": {"query": "메시지 등록"}, "id": "c1"},
     ])
@@ -179,7 +184,7 @@ def test_text_before_tool_call_streams_before_search_event(settings):
 
     names = [name for name, _ in frames]
     search_at = names.index("search")
-    assert "".join(d for n, d in frames[:search_at] if n == "token") == "문서를 먼저 검색해 볼게요."
+    assert [d for n, d in frames[:search_at] if n == "token"] == []      # 멘트는 나가지 않는다
     assert "".join(d for n, d in frames[search_at:] if n == "token") == ANSWER
     assert names[-1] == "done"
 
@@ -385,7 +390,7 @@ def test_rewrite_output_is_not_streamed_as_token(settings):
     assert names[-1] == "done"
     tokens = "".join(data for name, data in frames if name == "token")
     assert rewritten not in tokens                     # rewrite 출력은 token 으로 새지 않는다
-    assert tokens == "근거 없는 임시 답변" + ANSWER
+    assert tokens == ANSWER                            # agent-17: 임시 답변은 아예 흐르지 않는다
     # agent-16: 강제 검색은 standalone_question 을 query 로 쓰고 search 이벤트로 드러난다
     assert [data for name, data in frames if name == "search"] == [
         {"tool": "search_confluence", "query": rewritten},
@@ -653,11 +658,10 @@ def test_system_facts_is_not_shown_as_a_search_line(settings):
     assert all(s["tool"] != "system_facts" for s in searches)
 
 
-def test_tokens_after_the_last_search_reproduce_the_stored_answer_exactly(settings):
-    """회차 2(Validator): 강제 검색 턴의 token 계약.
+def test_all_tokens_reproduce_the_stored_answer_exactly(settings):
+    """agent-17: 버려질 토큰을 아예 안 보내므로 **전체** token 합이 저장된 최종 답변과 같다.
 
-    UI 와 같은 규칙(`search` 에서 본문 초기화)으로 이어붙이면 저장된 최종 답변과 정확히 같다
-    = 서버가 답변 본문을 고치지 않는다. 임시 답변 토큰은 마지막 search 앞에만 있다.
+    (agent-16 회차 2 의 "마지막 search 이후 토큰만" 단서를 이 티켓이 없앤다.)
     """
     from langgraph.checkpoint.memory import InMemorySaver
 
@@ -668,9 +672,160 @@ def test_tokens_after_the_last_search_reproduce_the_stored_answer_exactly(settin
     frames = _frames(client.post("/v1/chat/stream",
                                  json={"thread_id": "tok", "message": "질문"}))
     last_search = max(i for i, (name, _) in enumerate(frames) if name == "search")
-    after = "".join(data for name, data in frames[last_search:] if name == "token")
+    tokens = "".join(data for name, data in frames if name == "token")
     before = "".join(data for name, data in frames[:last_search] if name == "token")
 
     stored = graph.get_state({"configurable": {"thread_id": "tok"}}).values["messages"][-1].content
-    assert after == stored == "검색 결과 기반 답변"
-    assert before == "근거 없는 임시 답변"         # 버려지는 임시 답변은 마지막 search 앞에만 있다
+    assert tokens == stored == "검색 결과 기반 답변"   # 서버가 본문을 고치지 않는다
+    assert before == ""                                # 버려질 임시 답변은 전송 자체를 하지 않는다
+
+
+# --- agent-17: 버려질 임시 답변이 화면에 흐르지 않는다 ---
+
+def test_no_token_is_sent_before_the_first_search(settings):
+    """S1. 강제 검색 턴에서 첫 search 이전에는 token 이 하나도 나가지 않는다."""
+    client, _ = _app([AIMessage("근거 없는 임시 답변"), AIMessage("검색 결과 기반 답변")],
+                     client=FakeClient([_chunk()]), settings=settings)
+
+    frames = _frames(_post(client, "안녕"))
+
+    names = [name for name, _ in frames]
+    first_search = names.index("search")
+    assert [d for n, d in frames[:first_search] if n == "token"] == []
+    assert "".join(d for n, d in frames if n == "token") == "검색 결과 기반 답변"
+    assert "근거 없는 임시 답변" not in "".join(str(d) for _, d in frames)
+
+
+def test_normal_tool_turn_is_unaffected(settings):
+    """S3. 모델이 스스로 도구를 호출하는 턴은 이벤트 순서·내용이 그대로다."""
+    rag = FakeClient([_chunk()])
+    client, _ = _app([_tool_call_message(query="메시지 등록"), AIMessage(ANSWER)],
+                     client=rag, settings=settings)
+
+    frames = _frames(_post(client))
+
+    names = [name for name, _ in frames]
+    assert names[0] == "search" and names[-1] == "done"
+    assert names.index("search") < names.index("token")
+    assert "".join(d for n, d in frames if n == "token") == ANSWER
+
+
+class _ScriptedGraph:
+    """astream 이 정해진 (mode, payload) 만 흘리는 가짜 그래프. 폴백 경로를 정확히 겨냥한다."""
+
+    def __init__(self, events):
+        self._events = events
+
+    async def astream(self, *args, **kwargs):
+        for event in self._events:
+            yield event
+
+
+def test_fallback_emits_the_answer_that_was_never_streamed(settings):
+    """S4. 도구 결과가 끝내 없어 token 을 한 번도 못 보냈으면 done 직전에 한 번에 보낸다.
+
+    강제 검색이 없는 그래프(도구 결과가 영영 안 생기는 구성)를 가정한다 — 폴백이 없으면
+    답변이 통째로 사라지는 최악의 실패가 된다.
+    """
+    import asyncio
+
+    from src.web.app import stream_events
+
+    graph = _ScriptedGraph([
+        ("messages", (AIMessage("유일한 "), {"langgraph_node": "agent"})),
+        ("messages", (AIMessage("답변"), {"langgraph_node": "agent"})),
+    ])
+
+    async def collect():
+        return [event async for event in stream_events(graph, {}, "질문")]
+
+    events = asyncio.run(collect())
+
+    assert [name for name, _ in events] == ["token", "done"]       # done 직전에 한 번에
+    assert events[0][1] == "유일한 답변"                            # 답변이 사라지지 않는다
+
+
+def test_fallback_does_not_duplicate_tokens(settings):
+    """폴백은 이미 내보낸 턴에서는 동작하지 않는다(중복 방출 금지)."""
+    rag = FakeClient([_chunk()])
+    client, _ = _app([_tool_call_message(query="q"), AIMessage("답변")], client=rag, settings=settings)
+
+    frames = _frames(_post(client))
+
+    assert [d for n, d in frames if n == "token"].count("답변") == 1
+
+
+def test_event_contract_is_unchanged_on_a_forced_turn(settings):
+    """S5. 이벤트 이름·순서 계약은 그대로다(search → token → [warning] → done)."""
+    fake = "https://confluence.kudos.com/x"
+    client, _ = _app([AIMessage("임시"), AIMessage(f"답변 {fake}")],
+                     client=FakeClient([_chunk()]), settings=settings)
+
+    names = [name for name, _ in _frames(_post(client))]
+
+    assert names[0] == "search"
+    assert names[-2:] == ["warning", "done"]          # warning 은 여전히 done 직전
+    assert set(names) <= {"search", "token", "warning", "done", "error"}
+
+
+def _no_tool_graph(responses):
+    """도구 결과가 한 번도 생기지 않는 최소 그래프(노드 이름은 서버가 보는 'agent' 그대로)."""
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from test.test_agent import ScriptedChatModel
+
+    model = ScriptedChatModel(responses=responses, received=[])
+
+    def agent(state):
+        return {"messages": [model.invoke(state["messages"])]}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("agent", agent)
+    builder.add_edge(START, "agent")
+    builder.add_edge("agent", END)
+    return builder.compile()
+
+
+def test_fallback_emits_the_answer_when_the_graph_never_produces_tool_results(settings):
+    """S4(Validator): 도구 결과가 끝내 없는 그래프에서도 답변이 사라지지 않는다.
+
+    Builder 의 폴백 테스트는 `build_graph` 를 써서 `system_facts` 도구 결과가 생기는 구성이라
+    "도구 결과가 한 번도 없는" 경로를 직접 태우지 않는다. 여기서는 그 경로를 태운다.
+    """
+    client = TestClient(create_app(_no_tool_graph([AIMessage("유일한 답변")]), settings))
+
+    frames = _frames(client.post("/v1/chat/stream", json={"thread_id": "s4", "message": "질문"}))
+
+    assert [name for name, _ in frames] == ["token", "done"]          # done 직전에 한 번에
+    assert [data for name, data in frames if name == "token"] == ["유일한 답변"]
+
+
+def test_fallback_keeps_the_warning_right_before_done(settings):
+    """폴백으로 답변을 낸 턴에서도 출처 경고는 done 직전 자리를 지킨다."""
+    fake = "https://confluence.kudos.com/x"
+    client = TestClient(create_app(_no_tool_graph([AIMessage(f"답변 {fake}")]), settings))
+
+    frames = _frames(client.post("/v1/chat/stream", json={"thread_id": "s4w", "message": "질문"}))
+
+    assert [name for name, _ in frames] == ["token", "warning", "done"]
+    assert [data for name, data in frames if name == "warning"] == [
+        {"kind": "unverified_source", "urls": [fake]}]
+
+
+def test_no_false_warning_when_the_graph_has_no_search_tools(settings):
+    """검색 도구가 없어도 버려진 임시 답변의 URL 이 출처 경고로 새지 않는다.
+
+    `system_facts` 호출만 있는 경우에도 누적 답변이 비워져야 한다(표시 제외와 무관).
+    """
+    from src.agent import build_graph
+    from test.test_agent import ScriptedChatModel
+
+    fake = "https://confluence.kudos.com/display/TEAM/FAKE"
+    model = ScriptedChatModel(responses=[AIMessage(f"근거 없는 임시 답변\n출처: {fake}"),
+                                         AIMessage("검색 결과 없이 답합니다.")], received=[])
+    client = TestClient(create_app(build_graph(model, [], None), settings))
+
+    frames = _frames(client.post("/v1/chat/stream", json={"thread_id": "nosearch", "message": "질문"}))
+
+    assert [data for name, data in frames if name == "warning"] == []
+    assert fake not in "".join(str(data) for _, data in frames)
+
