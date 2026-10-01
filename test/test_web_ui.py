@@ -878,6 +878,24 @@ def test_avatars_are_css_pseudo_elements_without_images():
     assert "url(" not in style                            # 이미지·아이콘 폰트 없음
 
 
+def test_conversation_turn_styling_is_not_replaced_by_the_dribbble_variants():
+    """agent-18 W1: 사용자는 "빈화면만" 바꾸라고 했다. 대화 화면은 그대로여야 한다.
+
+    미리보기(docs/plans/agent-18-ui-preview.html)의 변경 1(아바타→세로 괘선)·
+    변경 2(질문 말풍선→제목+구분선)가 섞여 들어오면 여기서 걸린다.
+    """
+    style = _style()
+    msg_rule = re.search(r"\.msg\s*\{([^}]*)\}", style).group(1)
+    assert "border-left" not in msg_rule                  # 변경 1: 세로 괘선 미적용
+    assert "margin-left:40px" in msg_rule.replace(" ", "")   # 아바타 자리를 그대로 비워 둔다
+
+    q_rule = re.search(r"\.msg\.q\s*\{([^}]*)\}", style, re.S).group(1)
+    assert re.search(r"border-radius\s*:\s*\d+px", q_rule), q_rule   # 변경 2: 말풍선 유지
+    assert re.search(r"padding\s*:", q_rule), q_rule
+    assert "border-bottom" not in q_rule                  # 변경 2: 제목+구분선 미적용
+    assert "font-weight" not in q_rule
+
+
 def test_tool_call_line_is_a_pill():
     assert re.search(r"\.search\s*\{[^}]*border-radius:\s*999px", _style())
 
@@ -1015,7 +1033,8 @@ def test_examples_are_locked_while_answering():
 def test_examples_have_their_own_styles_outside_msg():
     style = _style()
     assert re.search(r"#examples\s*\{[^}]*display\s*:\s*none", style)
-    assert re.search(r"#examples\.show\s*\{[^}]*display\s*:\s*grid", style)   # D11: 2×2 카드
+    assert re.search(r"#examples\.show\s*\{[^}]*display\s*:\s*flex", style)   # D11: 한 줄 pill 행
+    assert re.search(r"#examples\.show\s*\{[^}]*flex-wrap\s*:\s*wrap", style)
 
 
 # U13. 빈 화면 히어로 (D11)
@@ -1068,10 +1087,32 @@ def test_examples_are_four_labelled_cards():
     assert "form.requestSubmit()" in body
 
 
-def test_example_grid_is_two_columns_with_narrow_fallback():
+def test_examples_are_pills_that_wrap():
+    """한 줄 pill 가로 행(라벨+문구 한 줄, 둥근 모서리) + 폭이 모자라면 줄바꿈."""
     style = _style()
-    assert re.search(r"#examples\.show\s*\{[^}]*repeat\(2,", style)
-    assert re.search(r"@media \(max-width: \d+px\)\s*\{\s*#examples\.show\s*\{[^}]*1fr", style)
+    assert re.search(r"#examples button\s*\{[^}]*flex-direction\s*:\s*row", style)
+    assert re.search(r"#examples button\s*\{[^}]*border-radius\s*:\s*999px", style)
+    assert re.search(r"#examples\.show\s*\{[^}]*flex-wrap\s*:\s*wrap", style)   # 줄바꿈이 반응형 장치다
+    assert "grid-template-columns" not in style                   # 그리드 잔재물 없음
+
+
+def test_example_label_never_splits_across_lines():
+    """agent-18 T4: pill 이 좁은 폭에서 축소돼도 라벨(`운영` 등)이 두 줄로 쪼개지면 안 된다.
+
+    헤드리스 측정(420px): 이 선언이 없으면 `운영` 의 .tag 높이가 22px → 44px 로 늘어난다.
+    """
+    style = _style()
+    tag_rule = re.search(r"#examples \.tag\s*\{([^}]*)\}", style).group(1)
+    assert re.search(r"white-space\s*:\s*nowrap", tag_rule), tag_rule
+    assert re.search(r"font-size\s*:\s*13px", tag_rule), tag_rule      # T4 는 크기를 건드리지 않는다
+
+
+def test_examples_responsiveness_relies_on_wrapping_not_media_queries():
+    """반응형 장치는 flex-wrap 하나다. 폭 미디어쿼리가 되살아나면 두 메커니즘이 충돌한다."""
+    style = _style()
+    for block in re.findall(r"@media\s*\([^)]*max-width[^)]*\)\s*\{(.*?)\n  \}", style, re.S):
+        assert "#examples" not in block, block
+    assert not re.search(r"@media\s*\([^)]*max-width[^)]*\)\s*\{\s*#examples", style)
 
 
 # U14. 헤더 상태 (D12)

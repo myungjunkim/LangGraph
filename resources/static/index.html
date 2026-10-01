@@ -98,14 +98,13 @@
   #hero h2 { margin:0 0 8px; font-size:calc(var(--fs) * 1.7); font-weight:600; letter-spacing:-.2px; }
   #hero p { margin:0; font-size:calc(var(--fs) * 0.9); color:var(--muted); }
   #examples { display:none; gap:10px; padding:20px 0 4px; }
-  #examples.show { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #examples button { font:inherit; display:flex; flex-direction:column; gap:4px; text-align:left;
-                     padding:12px 14px; border:1px solid var(--line); border-radius:14px;
+  #examples.show { display:flex; flex-wrap:wrap; }
+  #examples button { font:inherit; display:flex; flex-direction:row; align-items:center; gap:8px;
+                     text-align:left; padding:8px 16px; border:1px solid var(--line); border-radius:999px;
                      background:var(--panel); color:var(--text); cursor:pointer; }
   #examples button:hover { border-color:var(--accent); }
-  #examples .tag { font-size:13px; color:var(--muted); }
-  #examples .text { font-size:calc(var(--fs) * 0.94); line-height:1.45; }
-  @media (max-width: 560px) { #examples.show { grid-template-columns: 1fr; } }
+  #examples .tag { font-size:13px; color:var(--muted); white-space:nowrap; }
+  #examples .text { font-size:calc(var(--fs) * 0.88); line-height:1.45; }
 
   /* 빈 화면에서는 로그를 접고 히어로·예시·입력창만 남긴다(요소는 DOM 에서 이동하지 않는다).
      묶음은 세로 중앙이 아니라 위쪽에 두고(D16), 예시와 입력창 사이를 넉넉히 벌린다.
