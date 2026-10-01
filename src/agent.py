@@ -14,7 +14,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from src.api_tool import build_api_tool
+from src.api_tool import build_api_tool, build_endpoint_list_tool
 from src.config.settings import Settings
 from src.llm_factory import create_chat_model
 from src.rag_client import RagClient
@@ -26,6 +26,11 @@ RUNTIME_ERRORS = (httpx.HTTPError, ollama.ResponseError, ConnectionError, GraphR
 API_TOOL_NAME = "call_api"
 SYSTEM_FACTS_TOOL = "system_facts"     # 강제 검색이 함께 넣는 합성 도구 이름(현재 시각 등)
 WEEKDAYS = "월화수목금토일"
+# 리라이팅 결과로 인정할 최대 길이. 기존 체크포인트 실측에서 정상 값이 최장 90자라 200 은 여유 있는 상한이다.
+# 다만 길이는 주 방어선이 아니다 — 실환경 재현에서 나온 오염 값은 171·190·112자로 전부 이 상한 아래였고,
+# 실제로 잡아낸 것은 sanitize_standalone_question 의 개행·마크다운 링크·`**` 조건이다.
+# 그 조건들을 지우고 길이만 남기면 이 가드는 무력해진다(근거: docs/plans/agent-21-rewrite-guard.md 판단 6·9).
+MAX_STANDALONE_QUESTION_CHARS = 200
 
 
 def current_time_line(now: datetime | None = None) -> str:
@@ -41,6 +46,24 @@ def current_time_line(now: datetime | None = None) -> str:
     if zone and zone[0] in "+-" and len(zone) == 5:
         zone = f"UTC{zone[:3]}:{zone[3:]}"
     return f"현재 시각: {moment:%Y-%m-%d} ({weekday}) {moment:%H:%M} {zone}"
+
+
+def sanitize_standalone_question(text: str) -> str:
+    """리라이팅 결과가 정상적인 한 문장일 때만 돌려준다. 아니면 빈 문자열(→ 원문 사용).
+
+    후속 질문을 다시 쓸 수 없는 입력("넌 안되겠다")이 오면 모델이 직전 답변을 통째로 복사해 뱉는다.
+    그 값은 검색어가 될 뿐 아니라 모델이 받는 마지막 질문까지 바꿔서, 사용자가 하지 않은 질문에 답하게 된다.
+    빈 문자열은 replace_last_question·force_search 가 이미 원문으로 처리하므로 폴백 분기가 따로 없다.
+    """
+    question = text.strip()
+    # 답변 전문은 길고 반드시 여러 줄이다. 목록 기호(`- `, `1. `)는 검사하지 않는다 —
+    # 정상 질문에도 하이픈·숫자가 흔해서 거짓 양성만 늘어난다
+    if not question or len(question) > MAX_STANDALONE_QUESTION_CHARS or "\n" in question:
+        return ""
+    # 마크다운 출처 링크·굵게 표시는 질문이 아니라 답변 서식의 흔적이다
+    if "](http" in question or "](/" in question or "**" in question:
+        return ""
+    return question
 
 
 def replace_last_question(messages, standalone_question: str):
@@ -90,12 +113,14 @@ SYSTEM_PROMPT = """당신은 팀 내부 문서(Confluence)와 사내 API 명세(
 1. 답하기 전에 반드시 검색 도구로 근거를 찾습니다. 인사말이나 일반 상식 질문은 예외입니다.
 2. 질문 성격에 따라 도구를 고릅니다. API 호출 방법은 search_openapi, 정책·설정값·운영 절차·용어는 search_confluence 를 쓰고,
    둘 다 필요하면 둘 다 호출합니다. 첫 검색 결과가 부족하면 검색어를 바꿔 다시 검색합니다.
+   엔드포인트 개수나 전체 목록을 묻는 질문은 list_api_endpoints 를 사용합니다.
 3. 후속 질문("그 API", "방금 알려준 것")이면 검색어를 앞 대화에서 다룬 대상 이름(API 이름·기능명·경로)으로 시작해,
    앞 대화 없이도 이해되는 독립 검색어로 만듭니다. 앞 대화에 나오지 않은 이름을 검색어에 넣지 않습니다.
 4. 사용자가 실제 호출·시험·응답 확인을 요청하면 call_api 로 GET 요청을 보냅니다.
    먼저 search_openapi 로 경로와 필수 파라미터를 확인한 뒤 호출합니다.
    요청하지 않았는데 임의로 호출하지 않습니다.
 5. 검색 결과에 없는 내용은 추측하지 않습니다. 근거를 찾지 못하면 "관련 내용을 문서에서 찾지 못했습니다." 라고 답합니다.
+   검색 결과는 관련도 상위 일부일 뿐입니다. 검색 결과만으로 전체 개수나 전체 목록을 단정하지 않습니다.
 6. API 관련 답변에는 HTTP 메서드, 경로, 필수 파라미터/필드를 명시합니다.
 7. 답변 끝에 `출처:` 목록으로 사용한 문서의 제목과 url 을 적습니다.
 8. 한국어로 간결하게 답합니다."""
@@ -134,7 +159,8 @@ def build_graph(chat_model: BaseChatModel, tools: list[BaseTool],
         # 도구를 붙이지 않은 원본 모델로 호출한다(리라이팅에서 도구 호출이 나오면 안 된다)
         response = chat_model.invoke([SystemMessage(REWRITE_PROMPT)] + history)
         # rewrite 는 매 턴의 첫 노드다. 강제 플래그를 여기서 되돌린다
-        return {"standalone_question": response.content.strip(), "forced": False}
+        return {"standalone_question": sanitize_standalone_question(response.content),
+                "forced": False}
 
     def agent(state: AgentState) -> dict:
         # SystemMessage 는 상태에 저장하지 않고 호출 때마다 앞에 붙인다(시각은 맨 앞).
@@ -208,6 +234,9 @@ def build_default_graph(settings: Settings,
     client = RagClient(settings.rag_base_url, settings.rag_search_path, settings.rag_timeout)
     tools = build_tools(client, settings.rag_top_k)
     if settings.api_services:              # 등재된 QA 서비스가 있을 때만 실호출 도구를 붙인다
-        tools = tools + [build_api_tool(settings.api_services, settings.api_timeout,
-                                        settings.api_max_chars)]
+        tools = tools + [
+            build_api_tool(settings.api_services, settings.api_timeout, settings.api_max_chars),
+            build_endpoint_list_tool(settings.api_services, settings.api_timeout,
+                                     settings.api_max_chars),
+        ]
     return build_graph(create_chat_model(settings), tools, checkpointer or InMemorySaver())

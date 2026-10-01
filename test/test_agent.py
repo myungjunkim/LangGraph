@@ -956,3 +956,228 @@ def test_forced_search_injects_the_current_time_as_a_tool_result():
     assert current_time_line()[:14] in facts[0].content          # 같은 날짜가 들어간다
     # 두 번째 agent 호출이 그 근거를 본다
     assert any(isinstance(m, ToolMessage) and m.name == "system_facts" for m in model.received[1])
+
+
+# --- agent-21: rewrite 결과 방어(R3) ---
+
+# T0 실측: 기존 체크포인트 DB(읽기 전용 사본)에서 뽑은 실제 standalone_question 값 중
+# 정상 리라이팅으로 분류한 24건(고유값). 하나라도 거부되면 후속 질문 문맥 보정이 죽는다
+REAL_STANDALONE_QUESTIONS = [
+    "오늘날짜를 알려줘",
+    "2027년 1월 7일입니다.",
+    "2026년 9월 28일입니다.",
+    "2026년 9월 29일입니다.",
+    "안녕하세요! 어떻게 도와드릴까요?",
+    "오늘은 2026년 1월 31일입니다.",
+    "주제 정보 검색 API 사용 방법 알려줘",
+    "메시지 등록 API의 필수 필드는 무엇인가요?",
+    "챗봇 서비스 배포 브랜치는 환경별로 무엇인가요?",
+    "오늘이 몇일인지에 대한 정보는 제공할 수 없습니다.",
+    "2026년 9월 29일부터 100일 뒤는 언제인가요?",
+    "오늘로부터 100일 뒤는 2027년 1월 7일입니다.",
+    "100일 후에 오늘(2026년 9월 30일)은 몇일이 되는지 알려줘.",
+    "2026년 9월 29일부터 100일 뒤는 2027년 1월 7일입니다.",
+    "최근 1주일 내 작성된 컨플페이지 리스트를 가져오는 방법은 무엇인가요?",
+    "2026년 9월 29일부터 100일 뒤는 2026년 12월 18일입니다.",
+    "챗봇 서비스에서 현재 사용하는 대표 브랜치는 각 환경에 따라 다음과 같습니다.",
+    "실제로 `GET /v2/topics` API를 사용하여 주제 정보를 검색해 보세요.",
+    "오늘 날짜를 1월로 인식해서 1월께의 컨플페이지 리스트가 나오는 이유는 무엇인가요?",
+    "메시지 등록 API 호출 방법에 대해 설명해 주셨는데, 테스트 예시는 어떻게 하나요?",
+    "챗봇에 등록되어 있는 API의 총 개수를 API 문서에서 찾아서 계산해서 알려주세요.",
+    "General Chatbot API 문서에서 확인한 API의 총 개수는 6개라고 확신합니다.",
+    "2026년 12월 18일은 오늘(2026년 9월 29일)부터 100일 뒤에 해당하는 날짜입니다.",
+    "주제 정보를 검색하는 `GET /v2/topics` API를 사용하여 회사 시퀀스 `53385`와"
+    " 사용자 ID `user01`으로 실제 호출을 수행해 보겠습니다.",
+]
+
+# 사고 스레드(c36b3085)의 실제 오염 값 앞부분. 원문은 1,608자·24줄이다
+REAL_CONTAMINATED_REWRITE = (
+    "챗봇에 등록되어 있는 General Chatbot API의 총 개수를 정확히 파악하기 위해"
+    " 제공된 문서를 검색한 결과, 다음과 같은 API들이 확인되었습니다:\n"
+    "\n"
+    "1. **GET /companyinfo** - 연수원정보 API 통신확인\n"
+    "2. **GET /check** - Health Check\n"
+    "3. **GET /v2/gpts/overview** - 주제(GPTs) 탐색 리스트 API\n"
+)
+# 같은 스레드의 또 다른 오염 값(776자) 앞부분. 출처 링크가 붙은 답변 문단이다
+REAL_CONTAMINATED_WITH_SOURCE = (
+    "챗봇에 등록되어 있는 API의 총 개수를 정확히 파악하기 위해 추가적인 정보가 필요합니다."
+    " 위의 검색 결과는 특정 API의 예시와 설명을 포함하고 있지만, 전체적인 API 개수에 대한"
+    " 명시적인 정보는 제공되지 않았습니다.\n\n출처: \n"
+    "- [에듀매니저 챗봇 API](https://ihunet.atlassian.net/wiki/spaces/KUDOS/pages/5218042970/A)\n"
+)
+
+
+@pytest.mark.parametrize("question", REAL_STANDALONE_QUESTIONS)
+def test_real_rewrites_are_all_accepted(question):
+    """W1. 실제 DB 에서 나온 정상 리라이팅은 하나도 거부하지 않는다(거짓 양성 0)."""
+    from src.agent import sanitize_standalone_question
+
+    assert sanitize_standalone_question(question) == question
+
+
+@pytest.mark.parametrize("contaminated", [REAL_CONTAMINATED_REWRITE, REAL_CONTAMINATED_WITH_SOURCE])
+def test_the_real_incident_values_are_rejected(contaminated):
+    """W2. 실제 사고 스레드에서 standalone_question 에 들어갔던 답변 전문은 거부한다."""
+    from src.agent import sanitize_standalone_question
+
+    assert sanitize_standalone_question(contaminated) == ""
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\n", "\t"])
+def test_blank_rewrite_is_rejected(text):
+    """W3-1. strip 후 비면 빈 문자열(기존 동작과 동일)."""
+    from src.agent import sanitize_standalone_question
+
+    assert sanitize_standalone_question(text) == ""
+
+
+def test_length_limit_is_inclusive_at_the_boundary():
+    """W3-2. 정확히 상한 길이는 통과하고 한 글자 더 길면 거부한다."""
+    from src.agent import MAX_STANDALONE_QUESTION_CHARS, sanitize_standalone_question
+
+    limit = MAX_STANDALONE_QUESTION_CHARS
+    assert sanitize_standalone_question("가" * limit) == "가" * limit
+    assert sanitize_standalone_question("가" * (limit + 1)) == ""
+    # 길이는 strip 후 값으로 잰다. 공백을 뺀 200자는 통과한다
+    assert sanitize_standalone_question("  " + "가" * limit + "  ") == "가" * limit
+
+
+def test_newline_is_rejected():
+    """W3-3. REWRITE_PROMPT 가 한 문장을 요구한다. 답변 전문은 반드시 여러 줄이다."""
+    from src.agent import sanitize_standalone_question
+
+    assert sanitize_standalone_question("메시지 등록 API의 필수 필드는?\n출처: 메시지 등록") == ""
+    # 앞뒤 개행은 strip 으로 제거되므로 거부하지 않는다
+    assert sanitize_standalone_question("\n메시지 등록 API의 필수 필드는?\n") == "메시지 등록 API의 필수 필드는?"
+
+
+@pytest.mark.parametrize("text", [
+    "메시지 등록 API [문서](https://x/2) 의 필수 필드는?",
+    "메시지 등록 API [문서](/wiki/pages/1) 의 필수 필드는?",
+])
+def test_markdown_link_is_rejected(text):
+    """W3-4. 출처 링크가 섞였다면 질문이 아니라 답변이다."""
+    from src.agent import sanitize_standalone_question
+
+    assert sanitize_standalone_question(text) == ""
+
+
+def test_bold_markup_is_rejected():
+    """W3-5. 굵게 표시는 답변 서식이다."""
+    from src.agent import sanitize_standalone_question
+
+    assert sanitize_standalone_question("**POST /v1/messages** 의 필수 필드는?") == ""
+
+
+def test_list_markers_and_plain_hyphens_are_not_rejected():
+    """명세 판단 (4): 목록 기호는 검사하지 않는다. 정상 질문의 하이픈·숫자를 죽이지 않기 위해서다."""
+    from src.agent import sanitize_standalone_question
+
+    for question in ["메시지 등록 API 의 v2/v3 - 차이는?", "1. 번째로 소개한 API 의 필수 필드는?",
+                     "GET /v2/topics 와 GET /v2/gpts/overview 의 차이는?"]:
+        assert sanitize_standalone_question(question) == question
+
+
+def test_rejected_rewrite_falls_back_to_the_original_question():
+    """W4. 거부되면 모델이 받는 마지막 질문도 force_search 검색어도 사용자 원문이다(새 분기 없음)."""
+    client = FakeClient([_chunk()])
+    graph, model = _graph([
+        AIMessage("1턴 임시"), AIMessage("1턴 답변"),
+        AIMessage(REAL_CONTAMINATED_REWRITE),            # 2턴 rewrite — 답변 전문을 복사해 뱉는다
+        AIMessage("2턴 임시"), AIMessage("2턴 답변"),
+    ], client=client, checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("메시지 등록 API 알려줘")]}, config=_thread("guard"))
+    state = graph.invoke({"messages": [HumanMessage("넌 안되겠다")]}, config=_thread("guard"))
+
+    assert state["standalone_question"] == ""
+    assert model.received[3][-1].content == "넌 안되겠다"          # 질문이 바뀌지 않는다
+    assert [c[0] for c in client.calls][2:] == ["넌 안되겠다", "넌 안되겠다"]   # 검색어도 원문
+    assert set(state) == {"messages", "standalone_question", "forced"}     # 새 상태 필드 없음
+
+
+def test_accepted_rewrite_still_replaces_the_question():
+    """W6 의 단위 대응물: 정상 리라이팅은 지금까지처럼 질문·검색어를 대신한다."""
+    client = FakeClient([_chunk()])
+    graph, model = _graph([
+        AIMessage("1턴 임시"), AIMessage("1턴 답변"),
+        AIMessage("  메시지 등록 API의 필수 필드는 무엇인가요?  "),   # 앞뒤 공백은 strip 된다
+        AIMessage("2턴 임시"), AIMessage("2턴 답변"),
+    ], client=client, checkpointer=InMemorySaver())
+
+    graph.invoke({"messages": [HumanMessage("메시지 등록 API 알려줘")]}, config=_thread("keep"))
+    state = graph.invoke({"messages": [HumanMessage("그거 필수 필드는?")]}, config=_thread("keep"))
+
+    assert state["standalone_question"] == "메시지 등록 API의 필수 필드는 무엇인가요?"
+    assert model.received[3][-1].content == "메시지 등록 API의 필수 필드는 무엇인가요?"
+    assert [c[0] for c in client.calls][2:] == ["메시지 등록 API의 필수 필드는 무엇인가요?"] * 2
+
+
+# --- agent-21 검증 보강(Validator): 실측 재현값 고정 ---
+
+# Validator 가 InMemorySaver 로 사고 시나리오를 재현했을 때 rewrite 가 실제로 뱉은 오염 값 3건.
+# 길이 조건(200자)은 셋 다 잡지 못했다(171·190·112자). 마크다운 조건만이 잡는다
+LIVE_CONTAMINATED_REWRITES = [
+    # 3줄 + 출처 링크 + 굵게
+    "챗봇에 등록되어 있는 API의 총 개수는 **9개**입니다."
+    " 이는 OpenAPI 문서에서 확인한 고유 경로의 수를 바탕으로 계산한 결과입니다.\n\n"
+    "출처: [general-chatbot-api OpenAPI 문서](https://qa-general-chatbot-api.hunet.ai/openapi.json)",
+    # 3줄 + 출처 링크 (굵게 없음)
+    "General Chatbot API 문서에서 확인한 바에 따르면, 등록된 API는 총 6개입니다."
+    " 이는 OpenAPI 문서에 명시된 경로와 기능을 바탕으로 한 확인 결과입니다.\n\n"
+    "출처: [general-chatbot-api OpenAPI 문서](https://qa-general-chatbot-api.hunet.ai/openapi.json)",
+]
+
+# 112자 · 1줄 · 링크 없음. 조건 1~4 를 전부 통과하고 **조건 5(`**`) 만** 잡는 실측 값이다.
+# 명세 리드 판단 (6) 의 근거라서 따로 고정한다
+LIVE_CONTAMINATED_BOLD_ONLY = (
+    "General Chatbot API 문서에서 명시된 API 경로의 수는 **6개**라고 주장하셨는데,"
+    " 이는 OpenAPI 문서에 기반한 정확한 수치가 아니라는 점을 다시 한 번 확인해 주시기 바랍니다."
+)
+
+# DB 실측 오염 값 중 유일하게 **조건 4(링크) 만** 잡는 값(71자·1줄, 스레드 71051288)
+DB_CONTAMINATED_LINK_ONLY = (
+    "100일 후는 2027년 12월 28일입니다. 출처: [날짜 및 시간 정보](https://www.timeanddate.com)"
+)
+
+
+@pytest.mark.parametrize("contaminated", LIVE_CONTAMINATED_REWRITES)
+def test_live_reproduced_contaminated_rewrites_are_rejected(contaminated):
+    """W7. 실환경 재현에서 나온 오염 값을 거부한다."""
+    from src.agent import sanitize_standalone_question
+
+    assert sanitize_standalone_question(contaminated) == ""
+
+
+def test_the_bold_only_contamination_needs_the_bold_condition():
+    """리드 판단 (6). 1줄·200자 미만·링크 없는 실측 오염 값은 조건 5 가 없으면 통과해 버린다."""
+    from src.agent import MAX_STANDALONE_QUESTION_CHARS, sanitize_standalone_question
+
+    text = LIVE_CONTAMINATED_BOLD_ONLY
+    # 조건 2·3·4 는 이 값을 하나도 잡지 못한다 — 조건 5 를 빼면 방어가 뚫린다
+    assert len(text) <= MAX_STANDALONE_QUESTION_CHARS
+    assert "\n" not in text
+    assert "](http" not in text and "](/" not in text
+    assert sanitize_standalone_question(text) == ""
+
+
+def test_the_link_only_contamination_needs_the_link_condition():
+    """DB 실측. 1줄·200자 미만·굵게 없는 오염 값은 조건 4 가 없으면 통과해 버린다."""
+    from src.agent import MAX_STANDALONE_QUESTION_CHARS, sanitize_standalone_question
+
+    text = DB_CONTAMINATED_LINK_ONLY
+    assert len(text) <= MAX_STANDALONE_QUESTION_CHARS
+    assert "\n" not in text and "**" not in text
+    assert sanitize_standalone_question(text) == ""
+
+
+def test_the_length_boundary_is_measured_after_strip():
+    """W3. 길이 판정 기준은 strip 전후가 아니라 strip 후 값 하나로 일관된다."""
+    from src.agent import MAX_STANDALONE_QUESTION_CHARS, sanitize_standalone_question
+
+    limit = MAX_STANDALONE_QUESTION_CHARS
+    # strip 전 길이는 상한을 넘지만 strip 후가 상한이면 통과한다
+    assert sanitize_standalone_question("\n\t " + "가" * limit + " \n") == "가" * limit
+    # strip 후가 상한을 한 글자 넘으면 공백을 아무리 둘러도 거부한다
+    assert sanitize_standalone_question("   " + "가" * (limit + 1) + "   ") == ""

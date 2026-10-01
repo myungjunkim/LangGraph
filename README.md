@@ -221,6 +221,31 @@ HTTP 200 으로 응답했고 ...
 - 에이전트는 **사용자가 요청했을 때만** 호출한다(`SYSTEM_PROMPT` 규칙 4). 일반 질문에는 검색만 한다.
 - 인증은 쓰지 않는다(현재 QA API 는 인증 불필요). 운영 호출·쓰기 요청은 이 프로젝트 범위 밖이다.
 
+### 엔드포인트 개수·목록 (`list_api_endpoints`)
+
+"이 서비스에 API 가 총 몇 개냐" 는 질문은 검색으로 풀 수 없다. 검색은 관련도 상위 k건만 주고,
+근거를 전부 줘도 LLM 은 긴 스펙에서 합계를 틀린다(실측 기록: `docs/plans/agent-19-api-count-diagnosis.md`).
+그래서 **숫자는 코드가 세고 LLM 은 전달만 한다.**
+
+```
+> general chatbot api의 총 api 개수가 몇 개야?
+[호출] list_api_endpoints(general-chatbot-api)
+general-chatbot-api 엔드포인트 총 9개 (고유 경로 9개)
+출처: https://qa-general-chatbot-api.hunet.ai/openapi.json
+- GET /check — Check
+- GET /companyinfo — Companyinfo
+...
+```
+
+- 인자는 `service` 하나다. `GET {base_url}/openapi.json` 으로 스펙을 받아 `paths` 의 **(메서드, 경로) 조합**을 센다.
+- 1행에 **고유 경로 수를 항상 병기**한다. 한 경로에 메서드가 여럿이면 두 기준이 갈리기 때문이다
+  (`message-api` 는 조합 145 / 경로 130). 두 값이 같아도 병기해서 "무엇을 센 숫자냐" 를 묻지 않게 한다.
+- `paths[경로]` 아래의 `parameters`·`summary`·`$ref` 같은 **비(非)메서드 키는 세지 않는다.** HTTP 메서드 8종만 센다.
+- 출력 **1행이 총 개수**다. 목록이 `[api] max-response-chars` 에 걸려 잘려도 숫자는 남는다(`message-api` 는 실제로 잘린다).
+  절단은 **줄 경계**에서만 일어나고, 표시/전체 개수를 함께 알려준다.
+- 정렬은 경로 사전순 → 메서드 사전순으로 고정이라 같은 스펙이면 출력이 항상 같다.
+- QA 가드·미등재 service 처리는 `call_api` 와 동일하다. 새 설정 키는 없다.
+
 서비스를 추가하려면 `config_local.ini` 의 `[api-services]` 에 `이름=https://…qa….example.com` 한 줄을 넣고
 서버를 다시 띄운다. 항목이 하나도 없으면 실호출 도구 없이 검색 도구 2개만으로 동작한다.
 
@@ -289,7 +314,7 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `test/test_web.py` | FastAPI 라우트, SSE 이벤트 순서·헤더, 멀티턴, 422 |
 | `test/test_checkpointer.py` | SQLite 영속성(재시작 후 대화 유지), `build_default_graph` 기본값 |
 | `test/test_maintenance.py` | 대화 열거·만료 선택 경계·삭제·출력 형식(임시 DB) |
-| `test/test_api_tool.py` | 운영 차단·GET 전용 계약·입력 방어(요청 미발생)·절단·표시 |
+| `test/test_api_tool.py` | 운영 차단·GET 전용 계약·입력 방어(요청 미발생)·절단·표시, 엔드포인트 집계(메서드 화이트리스트·개수 위치) |
 | `test/test_launcher.py` | 중복 실행 방지(spawn 미호출), PID 파일 처리, `--stop` 안전 규칙 |
 | `test/test_web_ui.py` | `index.html` 계약(상대 경로, 이벤트 이름, CDN·innerHTML 금지) |
 | `test/test_integration_web.py` | 실제 스트리밍으로 `search`/`token`/`done` 확인 |
@@ -303,10 +328,10 @@ pytest -m integration  # RAG 서버 + Ollama 필요. 조건 미충족 시 skip
 | `src/llm_factory.py` | `create_chat_model(settings)` — LLM 생성 단일 지점 |
 | `src/rag_client.py` | `RagClient.search()` — `POST /v1/search` 호출 |
 | `src/tools.py` | `build_tools(client, top_k)` — `search_confluence`, `search_openapi` |
-| `src/api_tool.py` | `validate_base_url`(QA 전용 검사), `build_api_tool` — GET 전용 `call_api` |
+| `src/api_tool.py` | `validate_base_url`(QA 전용 검사), `build_api_tool` — GET 전용 `call_api`, `build_endpoint_list_tool` — 엔드포인트 개수·목록 `list_api_endpoints` |
 | `web.py` | 웹 진입점, `uvicorn.run(create_app(graph, settings))` |
 | `src/agent.py` | `SYSTEM_PROMPT`, `build_graph(chat_model, tools, checkpointer)`, `build_default_graph(settings)`, `RUNTIME_ERRORS` |
-| `src/agent.py` 의 `rewrite` 노드 | 후속 질문을 앞 대화 없이도 이해되는 독립 질문(`REWRITE_PROMPT`)으로 다시 써 agent 에 힌트로 전달. 첫 턴은 LLM 호출 없이 우회 |
+| `src/agent.py` 의 `rewrite` 노드 | 후속 질문을 앞 대화 없이도 이해되는 독립 질문(`REWRITE_PROMPT`)으로 다시 써 agent 에 힌트로 전달. 첫 턴은 LLM 호출 없이 우회. 결과가 한 문장 질문이 아니면(길이 200자 초과·여러 줄·마크다운 서식) `sanitize_standalone_question` 이 버리고 사용자 원문 질문을 쓴다 |
 | `src/web/app.py` | `create_app`, `stream_events`(SSE), `check_rag`/`check_ollama` |
 | `src/web/dto.py` | `ChatRequest`, `HealthResponse`, `ThreadMessage`, `ThreadMessagesResponse` |
 | `src/checkpointer.py` | `sqlite_saver`(CLI·동기), `async_sqlite_saver`(웹·비동기) |
