@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-18 UI 변경 비교 미리보기</title>
+<style>
+  :root { --pg-bg:#f2f3f5; --pg-line:#d8dade; --pg-text:#1f2328; --pg-muted:#6b7280; --pg-card:#fff; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px; background:var(--pg-bg); color:var(--pg-text);
+         font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  h1 { font-size:19px; margin:0 0 4px; }
+  .lead { margin:0 0 16px; font-size:14px; color:var(--pg-muted); }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+  .controls button { font:inherit; font-size:14px; padding:8px 14px; border-radius:999px;
+                     border:1px solid var(--pg-line); background:var(--pg-card); cursor:pointer; }
+  .controls button[aria-pressed="true"] { background:#0b5fff; border-color:#0b5fff; color:#fff; }
+  .panes { display:grid; grid-template-columns: 1fr 1fr; gap:16px; align-items:start; }
+  @media (max-width: 1100px) { .panes { grid-template-columns: 1fr; } }
+  .pane { background:var(--pg-card); border:1px solid var(--pg-line); border-radius:12px; overflow:hidden; }
+  .pane > h2 { margin:0; padding:10px 14px; font-size:14px; border-bottom:1px solid var(--pg-line);
+               display:flex; justify-content:space-between; align-items:center; }
+  .pane > h2 .badge { font-size:12px; font-weight:400; color:var(--pg-muted); }
+  iframe { display:block; width:100%; height:760px; border:0; }
+  .legend { margin-top:20px; background:var(--pg-card); border:1px solid var(--pg-line);
+            border-radius:12px; padding:14px 18px; }
+  .legend h2 { font-size:15px; margin:0 0 8px; }
+  .legend ol { margin:0; padding-left:20px; font-size:14px; line-height:1.8; }
+  .legend code { background:#eceef1; padding:1px 5px; border-radius:4px; font-size:13px; }
+  .note { margin-top:10px; font-size:13px; color:var(--pg-muted); }
+</style>
+</head>
+<body>
+<h1>UI 변경 비교 — 현재 vs 제안</h1>
+<p class="lead">왼쪽은 현재 화면(<code>resources/static/index.html</code> 의 CSS 를 그대로 사용), 오른쪽은 제안 3건만 덧씌운 화면입니다. 내용은 양쪽이 동일합니다.</p>
+
+<div class="controls">
+  <button type="button" data-view="chat" aria-pressed="true">대화 화면</button>
+  <button type="button" data-view="empty" aria-pressed="false">빈 화면(예시 질문)</button>
+  <span style="width:12px"></span>
+  <button type="button" data-theme="light" aria-pressed="true">라이트</button>
+  <button type="button" data-theme="dark" aria-pressed="false">다크</button>
+</div>
+
+<div class="panes">
+  <section class="pane">
+    <h2>현재 <span class="badge">index.html 그대로</span></h2>
+    <iframe id="before" title="현재 화면"></iframe>
+  </section>
+  <section class="pane">
+    <h2>제안 <span class="badge">변경 1·2·3 적용</span></h2>
+    <iframe id="after" title="제안 화면"></iframe>
+  </section>
+</div>
+
+<div class="legend">
+  <h2>무엇이 달라졌나</h2>
+  <ol>
+    <li><strong>답변 아바타 → 왼쪽 괘선</strong>: 파란 원 <code>A</code> 배지를 없애고 <code>border-left</code> 세로선으로 턴을 구분합니다.</li>
+    <li><strong>질문 말풍선 → 문서 제목</strong>: 파란 말풍선 대신 좌측 정렬 굵은 제목 + 아래 <code>border-bottom</code> 구분선으로 보여 줍니다.</li>
+    <li><strong>예시 질문 2×2 → 한 줄 pill</strong>: 카드 그리드를 라벨+문구가 한 줄에 들어가는 둥근 pill 가로 행으로 바꿉니다.</li>
+  </ol>
+  <p class="note">CSS 만 바뀝니다. DOM 구조·JS 로직·서버·SSE 계약은 그대로입니다.</p>
+</div>
+
+<script>
+const BASE_CSS = '\n  /* 색은 변수로만 두고, 다크 모드에서는 이 변수들만 바꾼다(구조 CSS 는 한 벌) */\n  :root {\n    --bg:#ffffff; --panel:#f7f7f8; --line:#e5e5e7; --text:#1f2328; --muted:#6b7280;\n    --accent:#0b5fff; --bubble:#eef2ff; --code-bg:#f3f4f6;\n    --fs: 17px;   /* 본문 기준 글자 크기. 이 값만 바꾸면 전체가 따라 움직인다 */\n  }\n  @media (prefers-color-scheme: dark) {\n    :root {\n      --bg:#1f2023; --panel:#2a2b2f; --line:#3a3b40; --text:#ececf1; --muted:#9aa0a6;\n      --accent:#7cb2ff; --bubble:#2f3b52; --code-bg:#17181b;\n    }\n  }\n  * { box-sizing: border-box; }\n  body { margin:0; font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;\n         background:var(--bg); color:var(--text); font-size:var(--fs); line-height:1.7; }\n  header { position:sticky; top:0; z-index:2; padding:10px 20px; background:var(--bg);\n           border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }\n  header h1 { font-size:var(--fs); margin:0; font-weight:600; }\n  #health { font-size:calc(var(--fs) * 0.76); color:var(--muted); margin-left:auto; display:inline-flex;\n            align-items:center; gap:6px; cursor:default; }\n  #health::before { content:""; width:8px; height:8px; border-radius:50%; background:#8b949e; }\n  #health.ok::before { background:#1a7f37; }\n  #health.degraded::before { background:#bf8700; }\n  #health.down::before { background:#8b949e; }\n  #reset { font-size:calc(var(--fs) * 0.76); padding:6px 12px; border-radius:999px; border:1px solid var(--line);\n           background:var(--panel); color:var(--text); cursor:pointer; }\n  main { max-width: 768px; margin: 0 auto; padding: 0 16px clamp(28px, 5vh, 56px); }\n  #log { display:flex; flex-direction:column; gap:22px; padding:20px 0 8px; min-height: 50vh; }\n\n  /* 답변은 카드 없이 본문처럼, 질문만 연한 말풍선. 아바타는 ::before 로 그려 DOM 을 늘리지 않는다 */\n  .msg { position:relative; margin-left:40px; white-space:pre-wrap; font-size:var(--fs); line-height:1.7; }\n  .msg::before { content:"A"; position:absolute; left:-40px; top:0; width:30px; height:30px;\n                 border-radius:50%; background:var(--accent); color:#fff; font-size:13px;\n                 display:flex; align-items:center; justify-content:center; }\n  .msg.q { margin-left:auto; margin-right:40px; max-width:75%; background:var(--bubble);\n           border-radius:16px; padding:10px 14px; }\n  .msg.q::before { content:"나"; left:auto; right:-40px; background:var(--panel);\n                   color:var(--muted); border:1px solid var(--line); }\n\n  /* 도구 호출 줄: 회색 pill */\n  .search { display:inline-block; max-width:100%; margin:0 0 8px; padding:3px 12px; font-size:13px;\n            color:var(--muted); background:var(--panel); border:1px solid var(--line);\n            border-radius:999px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }\n  .body a { color:var(--accent); }\n\n  /* 생성 중 커서(D4). 요소를 만들지 않고 클래스만 토글한다 */\n  .body.streaming::after { content:"\\25AE"; margin-left:2px; color:var(--muted);\n                           animation: blink 1.05s steps(1, end) infinite; }\n  @keyframes blink { 50% { opacity: 0; } }\n\n  .msg h1 { font-size:22px; }\n  .msg h2 { font-size:19px; }\n  .msg h3 { font-size:17.5px; }\n  .msg h4 { font-size:16px; }\n  .msg h1, .msg h2, .msg h3, .msg h4 { font-weight:600; margin:10px 0 4px; }\n  .msg p { margin:6px 0; }\n  .msg ul, .msg ol { margin:6px 0 6px 20px; padding:0; }\n  .msg pre { background:var(--code-bg); padding:12px 14px; border-radius:8px; overflow-x:auto;\n             font-size:14px; line-height:1.55; margin:10px 0; }\n  .msg code { font-family: ui-monospace, Menlo, monospace; font-size:14px; background:var(--code-bg);\n              padding:1px 5px; border-radius:4px; }\n  .msg pre code { background:none; padding:0; }\n\n  /* 코드 블록 상단 바(D5) — 렌더러가 만든 <pre> 를 후처리로 감싼 결과 */\n  .codeblock { border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:8px 0; }\n  .codebar { display:flex; align-items:center; justify-content:space-between; gap:8px;\n             padding:5px 12px; background:var(--panel); font-size:13px; color:var(--muted); }\n  .codeblock pre { margin:0; border-radius:0; }\n  .copy { font:inherit; font-size:13px; padding:3px 10px; border-radius:6px; border:1px solid var(--line);\n          background:transparent; color:var(--muted); cursor:pointer; }\n  .copy:hover { color:var(--text); }\n  .answer-copy { margin-top:8px; }\n\n  /* 입력창(D3): 둥근 컨테이너 + 자동 확장 textarea + 원형 전송 버튼 */\n  /* 입력창은 뷰포트 바닥에 붙이지 않고 조금 띄운다(D16 보정) */\n  form { position:sticky; bottom: clamp(12px, 2vh, 24px); margin-top:8px; padding:10px 0 0;\n         background:var(--bg); }\n  .composer { display:flex; align-items:flex-end; gap:8px; padding:8px 8px 8px 16px;\n              border:1px solid var(--line); border-radius:24px; background:var(--panel); }\n  .composer:focus-within { border-color:var(--accent); }\n  #question { flex:1; border:0; outline:none; resize:none; background:none; color:inherit;\n              font:inherit; font-size:var(--fs); line-height:1.6; max-height:220px; padding:7px 0; }\n  #send { width:38px; height:38px; border-radius:50%; border:0; background:var(--accent); color:#fff;\n          font-size:18px; line-height:1; cursor:pointer; flex:none; }\n  button:disabled { opacity:.5; cursor:default; }\n  .hint { margin:6px 4px 0; font-size:calc(var(--fs) * 0.72); color:var(--muted); text-align:right; }\n\n  /* 빈 화면 히어로 + 예시(D10·D11). 대화가 시작되면 body.empty 가 떨어지고 기존 배치로 돌아간다 */\n  #hero { display:none; text-align:center; padding:8px 0 4px; }\n  body.empty #hero { display:block; }\n  #hero h2 { margin:0 0 8px; font-size:calc(var(--fs) * 1.7); font-weight:600; letter-spacing:-.2px; }\n  #hero p { margin:0; font-size:calc(var(--fs) * 0.9); color:var(--muted); }\n  #examples { display:none; gap:10px; padding:20px 0 4px; }\n  #examples.show { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }\n  #examples button { font:inherit; display:flex; flex-direction:column; gap:4px; text-align:left;\n                     padding:12px 14px; border:1px solid var(--line); border-radius:14px;\n                     background:var(--panel); color:var(--text); cursor:pointer; }\n  #examples button:hover { border-color:var(--accent); }\n  #examples .tag { font-size:13px; color:var(--muted); }\n  #examples .text { font-size:calc(var(--fs) * 0.94); line-height:1.45; }\n  @media (max-width: 560px) { #examples.show { grid-template-columns: 1fr; } }\n\n  /* 빈 화면에서는 로그를 접고 히어로·예시·입력창만 남긴다(요소는 DOM 에서 이동하지 않는다).\n     묶음은 세로 중앙이 아니라 위쪽에 두고(D16), 예시와 입력창 사이를 넉넉히 벌린다.\n     여백은 clamp() 로 화면 높이에 반응하게 두어 작은 창에서도 답답하거나 잘리지 않는다 */\n  body.empty main { min-height: calc(100vh - 52px); display:flex; flex-direction:column;\n                    justify-content:flex-start; padding-top: clamp(56px, 15vh, 180px); }\n  body.empty #log { display:none; }\n  body.empty #examples { margin-bottom: clamp(28px, 7vh, 72px); }\n  body.empty form { position:static; margin-top:0; padding:0; }\n  body.empty #tobottom { display:none; }\n\n  /* 맨 아래로(D9) — 사용자가 위로 스크롤했을 때만 보인다 */\n  #tobottom { display:none; position:fixed; right:24px; bottom:104px; padding:7px 14px;\n              border-radius:999px; border:1px solid var(--line); background:var(--panel);\n              color:var(--text); font-size:calc(var(--fs) * 0.8); cursor:pointer; }\n  #tobottom.show { display:block; }\n\n  .warn { margin-top:8px; padding:8px 12px; border-radius:10px; font-size:calc(var(--fs) * 0.85);\n          background:#fff4e5; border:1px solid #f0c36d; color:#7a4e00; }\n  @media (prefers-color-scheme: dark) { .warn { background:#3a2f1b; border-color:#6b5320; color:#f0d9a8; } }\n  .err { color:#cf222e; }\n  @media (prefers-color-scheme: dark) { .err { color:#ff7b72; } }\n';
+const DARK_CLASS_CSS = '\n  /* 미리보기 전용: 시스템 설정과 무관하게 보려고 같은 변수 값을 클래스로도 건다 */\n  html.dark {\n      --bg:#1f2023; --panel:#2a2b2f; --line:#3a3b40; --text:#ececf1; --muted:#9aa0a6;\n      --accent:#7cb2ff; --bubble:#2f3b52; --code-bg:#17181b;\n    }\n  html.dark .err { color:#ff7b72; }\n  html.dark .warn { background:#3a2f1b; border-color:#6b5320; color:#f0d9a8; }\n';
+const PROPOSED_CSS = '\n  /* ── 제안 1. 답변의 원형 아바타 제거 → 왼쪽 세로 괘선으로 턴 구분 ── */\n  .msg::before { content:none; }\n  .msg { margin-left:0; border-left:2px solid var(--line); padding-left:16px; }\n\n  /* ── 제안 2. 질문 말풍선 제거 → 문서 제목 + 아래 구분선 ── */\n  .msg.q { margin:0; max-width:none; background:none; border:0; border-radius:0;\n           border-bottom:1px solid var(--line); padding:0 0 10px;\n           font-weight:600; font-size:calc(var(--fs) * 1.25); line-height:1.4; }\n  .msg.q::before { content:none; }\n\n  /* ── 제안 3. 예시 질문 2×2 그리드 → 한 줄 pill 가로 행 ── */\n  #examples.show { display:flex; flex-wrap:wrap; }\n  #examples button { flex-direction:row; align-items:center; gap:8px;\n                     border-radius:999px; padding:8px 16px; }\n  #examples .text { font-size:calc(var(--fs) * 0.88); }\n';
+const HEADER = '\n  <header>\n    <h1>KUDOS RAG Agent</h1>\n    <button id="reset" type="button">새 대화</button>\n    <span id="health" class="ok" title="상태: ok">ok</span>\n  </header>\n';
+const CONVERSATION = '\n    <div id="log">\n      <div class="msg q">메시지 등록 API 호출 방법 알려줘</div>\n      <div class="msg a">\n        <div class="search">[검색] search_confluence(메시지 등록 API)</div>\n        <div class="search">[검색] search_openapi(메시지 등록 API)</div>\n        <div class="body">\n          <h3>메시지 등록 API</h3>\n          <p>두 가지 경로로 호출할 수 있습니다.</p>\n          <ul>\n            <li><strong>POST</strong> <code>/v1/messages/message</code> — 단건 등록</li>\n            <li><strong>POST</strong> <code>/v2/messages/message</code> — 대화 컨텍스트 포함</li>\n          </ul>\n          <p>필수 필드는 <code>service_key</code>, <code>page_key</code>, <code>user_id</code> 입니다.</p>\n          <div class="codeblock">\n            <div class="codebar"><span>json</span><button class="copy" type="button">복사</button></div>\n            <pre><code>{\n  "service_key": "kudos",\n  "page_key": "chat",\n  "user_id": "u-1024"\n}</code></pre>\n          </div>\n          <p>자세한 스펙은 <a href="#">Message Management API</a> 문서를 참고하세요.</p>\n          <p>출처:<br>- 메시지 등록 API 명세 https://ihunet.atlassian.net/wiki/spaces/KUDOS/pages/5331420830</p>\n        </div>\n        <button class="copy answer-copy" type="button">복사</button>\n      </div>\n      <div class="msg q">그 API 필수 필드는?</div>\n      <div class="msg a">\n        <div class="search">[검색] search_openapi(메시지 등록 API 필수 필드)</div>\n        <div class="body">\n          <p><code>service_key</code>, <code>page_key</code>, <code>user_id</code>,\n             <code>original_message</code> 네 가지가 필수입니다.</p>\n        </div>\n        <button class="copy answer-copy" type="button">복사</button>\n      </div>\n    </div>\n';
+const EMPTY = '\n    <div id="log"></div>\n';
+const HERO = '\n    <div id="hero">\n      <h2>무엇을 도와드릴까요?</h2>\n      <p>팀 문서와 사내 API 명세를 찾아 답하고, 요청하면 QA API 를 실제로 호출합니다.</p>\n    </div>\n';
+const EXAMPLES = '\n    <div id="examples" class="__SHOW__" aria-label="예시 질문">\n      <button type="button"><span class="tag">배포</span><span class="text">챗봇 서비스 배포 브랜치는 환경별로 무엇인가요?</span></button>\n      <button type="button"><span class="tag">운영</span><span class="text">userstore 설정 변경 시 롤링 재배포가 필요한 근거와 확인 절차는 무엇인가요?</span></button>\n      <button type="button"><span class="tag">API</span><span class="text">메시지 등록 API 호출 방법 알려줘</span></button>\n      <button type="button"><span class="tag">실호출</span><span class="text">message-api 의 /openapi.json 을 실제로 호출해줘</span></button>\n    </div>\n';
+const COMPOSER = '\n    <form>\n      <div class="composer">\n        <textarea id="question" rows="1" placeholder="무엇이든 물어보세요 (Shift+Enter 줄바꿈)"></textarea>\n        <button id="send" type="button" aria-label="전송">&#8593;</button>\n      </div>\n      <div class="hint">Enter 전송 · Shift+Enter 줄바꿈</div>\n    </form>\n';
+
+let view = 'chat';
+let theme = 'light';
+
+function documentFor(proposed) {
+  const body = view === 'chat' ? CONVERSATION : EMPTY;
+  // 실제 앱의 showExamples() 와 같은 규칙: 로그가 비었을 때만 예시를 보여 준다
+  const examples = EXAMPLES.replace('__SHOW__', view === 'empty' ? 'show' : '');
+  const css = BASE_CSS + DARK_CLASS_CSS + (proposed ? PROPOSED_CSS : '');
+  return [
+    '<!doctype html><html lang="ko" class="' + (theme === 'dark' ? 'dark' : '') + '">',
+    '<head><meta charset="utf-8"><style>' + css + '</style></head>',
+    '<body class="' + (view === 'empty' ? 'empty' : '') + '">',
+    HEADER,
+    '<main>', HERO, body, examples, COMPOSER, '</main>',
+    '</body></html>',
+  ].join('');
+}
+
+function render() {
+  document.getElementById('before').srcdoc = documentFor(false);
+  document.getElementById('after').srcdoc = documentFor(true);
+}
+
+for (const button of document.querySelectorAll('[data-view]')) {
+  button.addEventListener('click', () => {
+    view = button.dataset.view;
+    for (const other of document.querySelectorAll('[data-view]')) {
+      other.setAttribute('aria-pressed', String(other === button));
+    }
+    render();
+  });
+}
+
+for (const button of document.querySelectorAll('[data-theme]')) {
+  button.addEventListener('click', () => {
+    theme = button.dataset.theme;
+    for (const other of document.querySelectorAll('[data-theme]')) {
+      other.setAttribute('aria-pressed', String(other === button));
+    }
+    render();
+  });
+}
+
+render();
+</script>
+</body>
+</html>
