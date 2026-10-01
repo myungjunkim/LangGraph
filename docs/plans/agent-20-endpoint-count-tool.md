@@ -2,7 +2,7 @@
 
 - 작성일: 2026-09-30
 - 작성자: 리드
-- 상태: **READY FOR REVIEW** — Validator 회차 1 PASS(2026-09-30). 실환경 4/4 "총 9개". **사용자 커밋 대기**
+- 상태: **종결** — Validator 회차 1 PASS(2026-09-30, 실환경 4/4 "총 9개"). 사용자 승인 아래 커밋·푸시 완료(2026-10-01, `032319c`, agent-21 과 한 커밋)
 - 계기: agent-19 진단 결과, 사용자가 **R1+R2 우선 진행**을 승인.
 - 선행 문서: `docs/plans/agent-19-api-count-diagnosis.md` (원인 분리 근거 전부 여기에 있다. **먼저 읽을 것.**)
 - 저장소: `/Users/mjkim/workspace/LangGraph` 만. `/Users/mjkim/workspace/RAG` 는 건드리지 않는다.

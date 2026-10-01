@@ -2,7 +2,7 @@
 
 - 작성일: 2026-10-01
 - 작성자: 리드
-- 상태: **READY FOR REVIEW** — Validator 회차 1 PASS(2026-10-01). 단위 613 / 통합 11 green. **사용자 커밋 대기**
+- 상태: **종결** — Validator 회차 1 PASS(2026-10-01, 단위 613 / 통합 11 green). 사용자 승인 아래 커밋·푸시 완료(2026-10-01, `032319c`, agent-20 과 한 커밋)
 - 계기: agent-19 진단의 **D1**. 사용자 승인으로 R1+R2(agent-20) 완료 후 착수.
 - 선행 문서: `docs/plans/agent-19-api-count-diagnosis.md` (D1 절), `docs/plans/agent-20-endpoint-count-tool.md`
 - 저장소: `/Users/mjkim/workspace/LangGraph` 만.
